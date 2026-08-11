@@ -1,0 +1,22 @@
+# Testado com Python 3.10.11 no Windows.
+#
+# ATENÇÃO sobre o PaddleOCR: fixamos >=3.7.0,<4.0.0 de propósito, porque o
+# código em ocr_engine.py foi escrito para a API 3.x (predict()), que é
+# INCOMPATÍVEL com a API 2.x (ocr.ocr()). Não faça downgrade para 2.x.
+
+opencv-python>=4.9.0,<5.0.0
+numpy>=1.26.0,<2.0.0
+Pillow>=10.0.0,<11.0.0
+
+paddleocr>=3.7.0,<4.0.0
+paddlepaddle>=3.0.0,<4.0.0
+
+# Leitura das bases de apoio (Colaboradores.xlsx, Motivos.xlsx, Gestores.xlsx)
+openpyxl>=3.1.0,<4.0.0
+
+# Leitura de PDF (páginas -> imagem), para processar o PDF do mês inteiro.
+# Escolhido por ser um único pacote pip, sem dependência externa de um
+# programa como o Poppler (diferente de pdf2image) — mais simples de
+# instalar no Windows. O módulo importado chama-se "pymupdf" nas versões
+# atuais e "fitz" nas mais antigas; pdf_reader.py já trata os dois nomes.
+PyMuPDF>=1.24.0,<2.0.0

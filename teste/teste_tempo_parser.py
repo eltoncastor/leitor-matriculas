@@ -1,0 +1,163 @@
+"""
+teste/teste_tempo_parser.py
+
+Testes de tempo_parser.py: interpretação estruturada de data/hora, sempre
+respeitando a regra de nunca inventar/corrigir um valor "provável".
+
+Uso:
+    python teste\\teste_tempo_parser.py
+"""
+
+import os
+import sys
+from datetime import date, datetime, time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from tempo_parser import (  # noqa: E402
+    interpretar_data,
+    interpretar_hora,
+    interpretar_data_hora,
+    validar_data_hora,
+)
+
+
+def teste_data_formatos_validos():
+    print("=== Teste 1: formatos de data válidos ===")
+    assert interpretar_data("23/04/2026") == date(2026, 4, 23)
+    assert interpretar_data("23.04.2026") == date(2026, 4, 23)
+    assert interpretar_data("23-04-2026") == date(2026, 4, 23)
+    assert interpretar_data("23/04/26") == date(2026, 4, 23)  # ano de 2 dígitos -> 20xx
+    assert interpretar_data(" 05/01/2026 ") == date(2026, 1, 5)  # espaços nas pontas
+    print("  OK")
+    print()
+
+
+def teste_data_sem_ano_nao_e_aceita():
+    print("=== Teste 2: data sem ano nunca é aceita (nunca inventa o ano) ===")
+    assert interpretar_data("23/04") is None
+    assert interpretar_data("23.04") is None
+    print("  OK")
+    print()
+
+
+def teste_data_impossivel():
+    print("=== Teste 3: data impossível -> None ===")
+    assert interpretar_data("31/04/2026") is None  # abril não tem dia 31
+    assert interpretar_data("29/02/2027") is None  # 2027 não é bissexto
+    assert interpretar_data("15/13/2026") is None  # mês 13 não existe
+    assert interpretar_data("00/04/2026") is None  # dia 0 não existe
+    print("  OK")
+    print()
+
+
+def teste_data_bissexto_valido():
+    print("=== Teste 4: 29/02 em ano bissexto É válido (não é rejeitado por engano) ===")
+    assert interpretar_data("29/02/2028") == date(2028, 2, 29)
+    print("  OK")
+    print()
+
+
+def teste_data_formato_inesperado_ou_vazia():
+    print("=== Teste 5: formato inesperado / vazio -> None ===")
+    assert interpretar_data("") is None
+    assert interpretar_data(None) is None
+    assert interpretar_data("vinte e três de abril") is None
+    assert interpretar_data("23/abril/2026") is None
+    assert interpretar_data("23") is None
+    print("  OK")
+    print()
+
+
+def teste_hora_formatos_validos():
+    print("=== Teste 6: formatos de hora válidos ===")
+    assert interpretar_hora("11:05") == time(11, 5)
+    assert interpretar_hora("11.05") == time(11, 5)
+    assert interpretar_hora("11h05") == time(11, 5)
+    assert interpretar_hora("23:59:59") == time(23, 59, 59)
+    assert interpretar_hora(" 08:00 ") == time(8, 0)
+    print("  OK")
+    print()
+
+
+def teste_hora_impossivel_ou_invalida():
+    print("=== Teste 7: hora impossível / inválida -> None ===")
+    assert interpretar_hora("25:00") is None  # hora > 23
+    assert interpretar_hora("11:60") is None  # minuto > 59
+    assert interpretar_hora("") is None
+    assert interpretar_hora(None) is None
+    assert interpretar_hora("meio-dia") is None
+    print("  OK")
+    print()
+
+
+def teste_interpretar_data_hora_combinado():
+    print("=== Teste 8: interpretar_data_hora combina os dois, ou None se qualquer um falhar ===")
+    assert interpretar_data_hora("23/04/2026", "11:05") == datetime(2026, 4, 23, 11, 5)
+    assert interpretar_data_hora("23/04", "11:05") is None  # data inválida (sem ano)
+    assert interpretar_data_hora("23/04/2026", "25:00") is None  # hora inválida
+    assert interpretar_data_hora("", "") is None
+    print("  OK")
+    print()
+
+
+def teste_validar_data_hora_mensagens():
+    print("=== Teste 9: validar_data_hora devolve None quando válido, mensagem quando não ===")
+    assert validar_data_hora("23/04/2026", "11:05") is None  # válido -> sem observação
+
+    msg_vazios = validar_data_hora("", "")
+    assert msg_vazios and "data" in msg_vazios and "hora" in msg_vazios
+
+    msg_so_data = validar_data_hora("", "11:05")
+    assert msg_so_data and "data" in msg_so_data.lower()
+
+    msg_so_hora = validar_data_hora("23/04/2026", "")
+    assert msg_so_hora and "hora" in msg_so_hora.lower()
+
+    msg_impossivel = validar_data_hora("31/04/2026", "11:05")
+    assert msg_impossivel is not None
+
+    print("  OK")
+    print()
+
+
+def teste_ordenacao_usa_datetime_real_nao_texto():
+    print("=== Teste 10: comparação usa datetime real, não string (lexicográfico erraria) ===")
+    # Comparação lexicográfica de "9/1/2026" vs "10/1/2026" erraria (texto
+    # "10..." < "9..."); com datetime real, 9 de janeiro vem antes.
+    d1 = interpretar_data_hora("09/01/2026", "10:00")
+    d2 = interpretar_data_hora("10/01/2026", "08:00")
+    assert d1 < d2
+    print("  OK: 09/01/2026 < 10/01/2026 mesmo com comparação de string enganosa")
+    print()
+
+
+if __name__ == "__main__":
+    testes = [
+        teste_data_formatos_validos,
+        teste_data_sem_ano_nao_e_aceita,
+        teste_data_impossivel,
+        teste_data_bissexto_valido,
+        teste_data_formato_inesperado_ou_vazia,
+        teste_hora_formatos_validos,
+        teste_hora_impossivel_ou_invalida,
+        teste_interpretar_data_hora_combinado,
+        teste_validar_data_hora_mensagens,
+        teste_ordenacao_usa_datetime_real_nao_texto,
+    ]
+
+    falhas = 0
+    for teste in testes:
+        try:
+            teste()
+        except AssertionError as exc:
+            falhas += 1
+            print(f"  FALHOU: {teste.__name__}: {exc}")
+            print()
+
+    print("=" * 60)
+    if falhas == 0:
+        print(f"TODOS OS {len(testes)} TESTES PASSARAM.")
+    else:
+        print(f"{falhas} de {len(testes)} TESTE(S) FALHARAM.")
+        sys.exit(1)

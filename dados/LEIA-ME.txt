@@ -1,0 +1,18 @@
+Coloque aqui os três arquivos reais (ainda não fornecidos ao Claude):
+
+    Colaboradores.xlsx
+    Motivos.xlsx
+    Gestores.xlsx
+
+O programa lê esses arquivos automaticamente ao abrir (via data_manager.py).
+Nenhum dado de exemplo foi colocado aqui de propósito — o DataManager já
+funciona sem esses arquivos (mostra avisos claros em vez de quebrar), e
+assim que os arquivos reais forem colocados aqui, o programa passa a usá-los
+sem precisar de nenhuma mudança de configuração.
+
+Se os nomes das colunas dentro dos XLSX reais forem diferentes do que
+data_manager.py espera (ver COLUNAS_CANDIDATAS_* no topo do arquivo), ajuste
+essas listas — não é necessário mudar mais nada.
+
+Este arquivo (LEIA-ME.txt) pode ser apagado quando os XLSX reais forem
+colocados aqui.
