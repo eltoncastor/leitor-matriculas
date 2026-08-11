@@ -175,6 +175,142 @@ MOTIVO_HORARIO_NEGADO = "HORÁRIO NEGADO"
 # palavra inteira: cobre "NEGADO"/"NEGADA"/"H. NEGADO"/"Horário negado".
 _MARCA_FAMILIA_NEGADO = "NEGAD"
 
+# ---------------------------------------------------------------------------
+# Reconhecimento ESTRUTURAL da família "negado"
+#
+# A base de motivos é hoje uma lista FECHADA de 7 valores, e o único
+# sinônimo da família que sobrou nela é o próprio "HORÁRIO NEGADO". Isso
+# quebrou a comparação de texto INTEIRO: o que está escrito na folha é
+# quase sempre a abreviação ("Negado", "H.v. Nigado"), curta, contra um
+# candidato longo -- a similaridade despenca por diferença de TAMANHO, não
+# por falta de evidência ("Negade" x "HORÁRIO NEGADO" = 0.50).
+#
+# A saída NÃO é baixar o limiar global (isso afrouxaria também RH/ADM/
+# ARMÁRIOS/...), e sim olhar a ESTRUTURA do que foi lido:
+#
+#   1. o texto é quebrado em tokens; procura-se o token que carrega o
+#      NÚCLEO da expressão ("NEGADO"/"NEGADA") -- o "H."/"H.V." é só a
+#      abreviação de "horário" e vira evidência auxiliar, não o alvo;
+#   2. o token é passado por uma tabela FECHADA de confusões reais de OCR
+#      manuscrito (dígito lido no lugar de letra, n/v/w/m cursivos, o "d"
+#      quebrado em "ol"/"cl") -- nenhuma letra é inventada, só se desfaz
+#      uma troca conhecida;
+#   3. a decisão exige EVIDÊNCIA COMBINADA (nunca um único critério
+#      frouxo): similaridade alta sozinha, OU similaridade média mais um
+#      segundo critério independente -- o esqueleto de consoantes N-G-D
+#      da palavra, ou a presença da abreviação de "horário" antes dela;
+#   4. e, em qualquer caso, a evidência da família tem de ganhar por
+#      margem clara da melhor similaridade contra os motivos de FORA da
+#      família. É essa checagem que impede "RH", "ADM", "ARMÁRIOS",
+#      "FOLGA FIXA", "ESQUECEU CRACHÁ" e "TREINAMENTO" de serem sugados
+#      para cá.
+#
+# Os limiares foram calibrados contra os textos reais de OCR das folhas
+# fotografadas E contra um conjunto de controles negativos (os outros 6
+# motivos e suas deformações, nomes de gestor, texto impresso do
+# formulário): o pior controle negativo pontua 0.615 SEM nenhum critério
+# secundário, abaixo de qualquer combinação aceita aqui.
+# ---------------------------------------------------------------------------
+
+_NUCLEOS_FAMILIA = ("NEGADO", "NEGADA")
+
+# Dígito lido no lugar de letra (o caso real "NE6400" = "NEGADO" com
+# 6->G, 4->A, 0->O).
+_DIGITO_LIDO_COMO_LETRA = {
+    "0": "O", "1": "I", "3": "E", "4": "A", "5": "S", "6": "G", "8": "B",
+}
+# Letras cursivas confundidas entre si. Restrito ao que foi de fato
+# observado nas folhas ("vigado", "Wegado", "Migado" para "negado").
+_LETRAS_EQUIVALENTES = {"V": "N", "W": "N", "M": "N", "L": "I", "J": "I"}
+# "d" manuscrito que o OCR quebrou em dois caracteres ("Negaola" = NEGADA,
+# "vigaolo" = NEGADO).
+_DIGRAFOS_DE_D = (("OL", "D"), ("CL", "D"))
+
+# Abreviação de "horário" antes do núcleo: "H.", "H.V.", "Hiv", "Hev"...
+# (uma letra H seguida de no máximo duas letras, tudo num token curto).
+_RE_ABREVIACAO_HORARIO = re.compile(r"^H[A-Z]{0,2}$")
+
+# Esqueleto de consoantes de NEGADO/NEGADA, na ordem. Critério secundário
+# INDEPENDENTE da similaridade: "NEGOCIO" e "VENDEDOR" (controles
+# negativos) não o satisfazem; "NGGAND" e "Negoide" (leituras reais)
+# satisfazem.
+_ESQUELETO_FAMILIA = ("N", "G", "D")
+
+# Faixa de tamanho plausível para o núcleo lido (NEGADO/NEGADA têm 6).
+# Barra tokens curtos demais para carregarem a palavra ("NADA", "NAO").
+_TAMANHO_MINIMO_NUCLEO = 5
+_TAMANHO_MAXIMO_NUCLEO = 9
+
+# Similaridade que basta SOZINHA como evidência.
+LIMIAR_FAMILIA_FORTE = 0.75
+# Similaridade que só vale ACOMPANHADA de um segundo critério (esqueleto
+# de consoantes ou abreviação de "horário").
+LIMIAR_FAMILIA_COMBINADO = 0.60
+# Quanto a evidência da família precisa ganhar dos motivos de fora dela.
+MARGEM_SOBRE_OUTROS_MOTIVOS = 0.10
+
+
+def _desfazer_confusoes_ocr(texto: str) -> str:
+    """Aplica a tabela FECHADA de confusões de OCR manuscrito. Nunca
+    inventa caractere: só troca um caractere por outro que é sabidamente
+    a mesma forma escrita lida de outro jeito."""
+    texto = "".join(_DIGITO_LIDO_COMO_LETRA.get(c, c) for c in _normalizar(texto))
+    for lido, real in _DIGRAFOS_DE_D:
+        texto = texto.replace(lido, real)
+    return "".join(_LETRAS_EQUIVALENTES.get(c, c) for c in texto)
+
+
+def _tem_esqueleto_da_familia(token: str) -> bool:
+    """True se as consoantes N, G e D aparecem nessa ordem no token."""
+    restante = iter(token)
+    return all(consoante in restante for consoante in _ESQUELETO_FAMILIA)
+
+
+def avaliar_evidencia_familia_negado(texto_ocr: Optional[str]):
+    """
+    Mede a evidência ESTRUTURAL de que `texto_ocr` é uma leitura
+    deformada de "HORÁRIO NEGADO" (ver bloco de comentário acima).
+
+    Devolve `(similaridade, criterio_secundario, token_reconhecido)`:
+    `similaridade` é 0.0 quando nenhum token tem sequer a forma de um
+    núcleo da família, e `criterio_secundario` diz se algum critério
+    independente da similaridade corroborou a leitura. Não decide nada
+    sozinha -- quem decide é `resolver_motivo`, que ainda compara isto
+    com os motivos de fora da família.
+    """
+    tokens = [t for t in re.split(r"[^0-9A-Za-zÀ-ÿ]+", _normalizar(texto_ocr)) if t]
+    if not tokens:
+        return 0.0, False, None
+
+    convertidos = [_desfazer_confusoes_ocr(t) for t in tokens]
+    tem_abreviacao_horario = any(
+        len(t) <= 3 and _RE_ABREVIACAO_HORARIO.match(t) for t in convertidos
+    )
+
+    melhor_similaridade = 0.0
+    melhor_token = None
+    melhor_esqueleto = False
+    for original, convertido in zip(tokens, convertidos):
+        if not (_TAMANHO_MINIMO_NUCLEO <= len(convertido) <= _TAMANHO_MAXIMO_NUCLEO):
+            continue
+        # O núcleo sempre COMEÇA pela consoante N (ou por uma letra que o
+        # OCR confunde com ela). Sem isso, qualquer palavra de 5-9 letras
+        # entraria na disputa.
+        if not convertido.startswith("N"):
+            continue
+        similaridade = max(
+            difflib.SequenceMatcher(None, convertido, nucleo).ratio()
+            for nucleo in _NUCLEOS_FAMILIA
+        )
+        if similaridade > melhor_similaridade:
+            melhor_similaridade = similaridade
+            melhor_token = original
+            melhor_esqueleto = _tem_esqueleto_da_familia(convertido)
+
+    if melhor_token is None:
+        return 0.0, False, None
+    return melhor_similaridade, (melhor_esqueleto or tem_abreviacao_horario), melhor_token
+
 
 @dataclass
 class ResultadoMotivo:
@@ -259,11 +395,31 @@ def resolver_motivo(
     # AMBIGUA / SEM_CORRESPONDENCIA: última chance, só com evidência dupla.
     if canonico_na_base and familia:
         alvo = _normalizar(texto_ocr)
+        fora_da_familia = [c for c in candidatos_motivos if c not in familia]
+        sim_fora = _melhor_similaridade(alvo, fora_da_familia)
+
+        # (a) Texto INTEIRO parecido com uma entrada da família. Continua
+        # sendo o caminho preferencial quando a base ainda tem sinônimos
+        # cadastrados (ex.: "NEGADO" como motivo próprio).
         sim_familia = _melhor_similaridade(alvo, familia)
-        sim_fora = _melhor_similaridade(alvo, [c for c in candidatos_motivos if c not in familia])
         if sim_familia >= limiar_minimo and (sim_familia - sim_fora) >= margem_ambiguidade:
             return ResultadoMotivo(
                 texto_ocr, MOTIVO_HORARIO_NEGADO, "NORMALIZADA", sim_familia,
+                resultado.segundo_candidato, houve_fallback=True,
+            )
+
+        # (b) Reconhecimento ESTRUTURAL do núcleo "NEGADO"/"NEGADA" dentro
+        # do texto (ver bloco de comentário acima). É o que recupera a
+        # abreviação manuscrita ("Negade", "H.V. vigaolo", "NE6400"), cujo
+        # texto INTEIRO nunca chega perto de "HORÁRIO NEGADO" por pura
+        # diferença de tamanho.
+        sim_nucleo, criterio_secundario, _token = avaliar_evidencia_familia_negado(texto_ocr)
+        evidencia_suficiente = sim_nucleo >= LIMIAR_FAMILIA_FORTE or (
+            sim_nucleo >= LIMIAR_FAMILIA_COMBINADO and criterio_secundario
+        )
+        if evidencia_suficiente and (sim_nucleo - sim_fora) >= MARGEM_SOBRE_OUTROS_MOTIVOS:
+            return ResultadoMotivo(
+                texto_ocr, MOTIVO_HORARIO_NEGADO, "NORMALIZADA", sim_nucleo,
                 resultado.segundo_candidato, houve_fallback=True,
             )
 
@@ -339,6 +495,72 @@ def _expandir_para_entrada_mais_especifica(gestor: str, candidatos: List[str]) -
     if len(mais_especificos) == 1:
         return mais_especificos[0]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Código GR (ex.: "GR3", "GR5", "GRL")
+#
+# Quando o gestor é anotado pelo CÓDIGO, o código é a informação forte da
+# célula -- o que vem depois dele costuma ser o nome de quem estava na
+# portaria, escrito por cima/ao lado, e sai do OCR irreconhecível
+# ("GRS- Lmone", "GR5 -. Eosee"). Comparar o texto INTEIRO contra a base
+# nesses casos afunda a similaridade por causa do lixo, e o registro ia
+# para REVISAO mesmo com o código legível.
+#
+# A leitura do código segue exatamente o padrão de
+# `validacao/recuperacao_matricula.py`: gera todas as leituras plausíveis
+# do caractere do código por uma tabela FECHADA de confusões de OCR, e
+# depois PERGUNTA À BASE quais existem. Exatamente uma existe -> aceita;
+# duas ou mais -> ambíguo, ninguém escolhe (-> REVISAO). É essa checagem
+# contra a base que faz disto evidência, e não palpite: "GRI" (I lido no
+# lugar de 1 ou de L) casa com GR1 E com GRL, os dois cadastrados, e por
+# isso continua indo para revisão.
+# ---------------------------------------------------------------------------
+
+# Só o que é confusão REAL e observada, e só no caractere do código:
+# "S" no lugar de "5" (o mesmo par já tratado em
+# `ocr_engine.normalizar_matricula`) e a família I/L/1, que é justamente a
+# que produz ambiguidade e tem de continuar produzindo.
+_LEITURAS_DO_CODIGO = {
+    "S": ("5",),
+    "I": ("1", "L"),
+    "L": ("L", "1"),
+    "1": ("1", "L"),
+}
+# "G" lido como "6" é recorrente ("6R05"); o "R" não tem confusão aceita
+# aqui (as leituras esquisitas dele -- "Ghl", "Gkl", "Ge4" -- já são
+# resolvidas pela correspondência aproximada normal, sem precisar de
+# regra nova).
+_RE_CODIGO_GR = re.compile(r"^[G6]R(.)$")
+
+
+def _ler_codigo_gestor(texto: Optional[str], candidatos: List[str]) -> Optional[str]:
+    """
+    Lê um código de gestor ("GR3", "GR5", "GRL") no começo de `texto` e
+    devolve o candidato correspondente da base, ou None quando não há
+    código legível, quando ele não existe na base, ou quando mais de uma
+    leitura plausível existe na base (ambíguo -> REVISAO).
+    """
+    primeiro_token = _normalizar(texto).split()[0] if _normalizar(texto).split() else ""
+    primeiro_token = re.split(r"[^0-9A-Z]", primeiro_token)[0]
+
+    correspondencia = _RE_CODIGO_GR.match(primeiro_token)
+    if not correspondencia:
+        return None
+
+    caractere = correspondencia.group(1)
+    leituras = _LEITURAS_DO_CODIGO.get(caractere, (caractere,))
+
+    na_base = []
+    for leitura in leituras:
+        codigo = f"GR{leitura}"
+        for candidato in candidatos:
+            if _normalizar(candidato) == codigo and candidato not in na_base:
+                na_base.append(candidato)
+
+    if len(na_base) == 1:
+        return na_base[0]
+    return None  # nenhum código na base, ou mais de um (ambíguo)
 
 
 def _com_expansao(gestor: Optional[str], candidatos: List[str]) -> Optional[str]:
@@ -421,6 +643,26 @@ def resolver_responsavel(
                 similaridade=resultado_prefixo.similaridade,
                 houve_normalizacao=True,  # o campo foi reestruturado (texto residual descartado)
             )
+
+    # O CÓDIGO GR PREVALECE sobre o texto secundário do OCR: quando o
+    # código está legível, ele identifica o gestor sozinho, e o que vier
+    # depois dele (nome de auxiliar de portaria, rabisco, lixo) não muda
+    # mais nada. Vem DEPOIS das tentativas acima de propósito -- elas
+    # podem achar a identificação MAIS ESPECÍFICA ("GR3 - DIANA" inteira,
+    # em vez do código "GR3" sozinho), e a maior sequência confiável
+    # sempre ganha -- e ANTES da correspondência aproximada do texto
+    # inteiro, que é justamente a que se perde quando o lixo depois do
+    # código é grande ("GRS- Lmone").
+    gestor_por_codigo = _ler_codigo_gestor(texto_ocr, candidatos_gestores)
+    if gestor_por_codigo:
+        gestor_confirmado = _com_expansao(gestor_por_codigo, candidatos_gestores)
+        return ResultadoResponsavel(
+            texto_original=texto_ocr,
+            gestor_confirmado=gestor_confirmado,
+            status="APROXIMADA",
+            similaridade=None,
+            houve_normalizacao=_normalizar(gestor_confirmado) != _normalizar(texto_ocr),
+        )
 
     # Nenhum prefixo confiável encontrado: usa o resultado do texto inteiro
     # (aproximado, se houver; senão REVISAO) -- nunca inventa nada.

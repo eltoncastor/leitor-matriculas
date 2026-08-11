@@ -196,10 +196,18 @@ def teste_gestor_sem_expansao_unica_nao_e_chutado():
     checar((r.gestor_confirmado or "").strip() == "ANDERSON",
            f"'ANDERSON' (duas expansões possíveis) não vira ABREU nem CARLOS "
            f"(obtido: {r.gestor_confirmado!r})")
-    r2 = resolver_responsavel("GRS", GESTORES)
+    # "GRI": o I pode ser tanto o dígito 1 quanto a letra L, e GR1 e GRL
+    # existem OS DOIS na base -- duas leituras plausíveis, nenhuma escolha.
+    # (Este caso substituiu "GRS", que esta suíte tratava como ambíguo
+    # quando a leitura do código era só similaridade de texto. Com a
+    # tabela FECHADA de confusões de OCR, "S" é leitura conhecida de "5" e
+    # não de "L": GR5 é a ÚNICA leitura de "GRS" que existe na base, e por
+    # isso ela passou a ser aceita -- é o mesmo critério de evidência da
+    # recuperação de matrícula, não um chute. Ver teste_gestor_codigo_gr.)
+    r2 = resolver_responsavel("GRI", GESTORES)
     checar(r2.gestor_confirmado is None,
-           f"'GRS' (poderia ser GR5 ou GRL) -> REVISAO (obtido: {r2.gestor_confirmado!r}, "
-           f"status={r2.status})")
+           f"'GRI' (I pode ser 1 ou L; GR1 e GRL existem os dois) -> REVISAO "
+           f"(obtido: {r2.gestor_confirmado!r}, status={r2.status})")
     print()
 
 
@@ -275,14 +283,17 @@ def teste_normalizacao_nao_cria_confirmado_artificial():
     checar(r.status == "REVISAO" and r.motivo_confirmado is None,
            f"motivo sem relação -> REVISAO (obtido: {r.status}/{r.motivo_confirmado!r})")
 
-    # Gestor ambíguo entre GR5 e GRL: continua REVISAO.
-    r2 = classificar_registro(_registro(gestor="GRS"), COLABORADOR, dm)
+    # Gestor ambíguo entre GR1 e GRL: continua REVISAO.
+    r2 = classificar_registro(_registro(gestor="GRI"), COLABORADOR, dm)
     checar(r2.status == "REVISAO", f"gestor ambíguo -> REVISAO (obtido: {r2.status} -- {r2.observacao})")
 
-    # Data sem ano: continua bloqueando, mesmo com motivo/gestor perfeitos.
+    # Data sem ano SEM contexto de lote: continua bloqueando, mesmo com
+    # motivo/gestor perfeitos. (Com contexto confiável do lote o ano pode
+    # ser completado -- ver teste_data_sem_ano_com_contexto_do_lote na
+    # suíte da recuperação contextual; aqui não há contexto nenhum.)
     r3 = classificar_registro(_registro(data="23.04"), COLABORADOR, dm)
     checar(r3.status == "REVISAO" and r3.data_confirmada is None,
-           f"data sem ano -> REVISAO (obtido: {r3.status})")
+           f"data sem ano (sem contexto) -> REVISAO (obtido: {r3.status})")
 
     # Matrícula fora da base: continua REVISAO.
     r4 = classificar_registro(_registro(matricula="99999"), None, dm)

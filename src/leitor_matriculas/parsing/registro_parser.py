@@ -223,8 +223,14 @@ POSICOES_ESPERADAS_POR_FOLHA = 8
 # validação de verdade, por tempo_parser.interpretar_data, que exige ano).
 # Exigir o ano já neste filtro rejeitaria também esse caso legítimo antes
 # mesmo de chegar à validação certa para ele.
+# O separador APAGADO pela caneta/OCR ("07 53" no lugar de "07:53") também
+# é aceito na coluna HORA, mas com uma exigência extra que o separador
+# explícito não precisa ter: nesse caso o texto INTEIRO tem de ser só os
+# dois blocos de dígitos (^...$). Sem essa âncora, qualquer frase impressa
+# com dois números soltos ("FOR PRP 0017 12 34") voltaria a passar pelo
+# filtro — que é exatamente o que ele existe para barrar.
 _PARECE_DATA = re.compile(r"\d{1,2}\s*[./\-]\s*\d{1,2}(?:\s*[./\-]\s*\d{2,4})?")
-_PARECE_HORA = re.compile(r"\d{1,2}\s*[:hH.]\s*\d{2}")
+_PARECE_HORA = re.compile(r"\d{1,2}\s*[:hH.]\s*\d{2}|^\s*\d{1,2}\s+\d{2}\s*$")
 
 _FILTROS_DE_FORMATO_POR_COLUNA = {
     "data": _PARECE_DATA,

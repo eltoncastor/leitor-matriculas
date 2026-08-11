@@ -25,11 +25,15 @@ Formatos aceitos:
     DATA: dd/mm/aaaa, dd/mm/aa, dd-mm-aaaa, dd-mm-aa, dd.mm.aaaa, dd.mm.aa
           Ano com 2 dígitos é expandido para 20xx — isso NÃO é "inventar":
           o dígito do ano está de fato escrito na folha, só abreviado.
-          Data SEM ano (ex.: "23/04") é rejeitada de propósito: não há
-          como determinar o ano com segurança sem supor algo que não está
-          escrito, então devolve None (-> REVISAO).
-    HORA: hh:mm, hh.mm, hh"h"mm (ex. "11h05"), com segundos opcionais
-          (hh:mm:ss).
+          Data SEM ano (ex.: "23/04") continua sendo rejeitada por
+          `interpretar_data`: o ano não está escrito, e supor um seria
+          exatamente o "chute" que este módulo não faz. Quem tiver
+          CONTEXTO REAL do lote (ver `parsing/contexto_lote.py`) pode
+          reconhecer o dia/mês por `interpretar_data_sem_ano` e completar
+          o ano a partir das outras folhas do MESMO lote — a evidência aí
+          é externa e verificável, não uma suposição deste módulo.
+    HORA: hh:mm, hh.mm, hh"h"mm (ex. "11h05"), hh mm (separador apagado
+          pelo OCR, ex.: "07 53"), com segundos opcionais (hh:mm:ss).
 
 FORMATO CANÔNICO DE SAÍDA (requisito funcional definitivo): a planilha
 final nunca repete o separador que o OCR leu. `normalizar_data` devolve
@@ -71,8 +75,39 @@ _RE_DATA = re.compile(
 _RE_DATA_MES_ANO_COLADOS = re.compile(
     rf"^\s*(\d{{1,2}})\s*{_SEP_DATA}\s*(\d{{2}})(\d{{2}}|\d{{4}})\s*$"
 )
+
+# DATA sem ano ("23.04"): NÃO é uma data completa e `interpretar_data`
+# continua recusando esse texto. Este regex existe só para RECONHECER a
+# estrutura dia/mês, para quem tiver contexto real do lote poder completar
+# o ano (ver `interpretar_data_sem_ano` e `parsing/contexto_lote.py`).
+# Note o `$` logo depois do mês: um texto com um terceiro bloco ("23.04.26",
+# "23.0426") não cai aqui — ele já é uma data completa e é tratado acima.
+_RE_DATA_SEM_ANO = re.compile(rf"^\s*(\d{{1,2}})\s*{_SEP_DATA}\s*(\d{{1,2}})\s*$")
+
+# Último recurso para uma data cujo SEPARADOR o OCR multiplicou ou moveu,
+# mas cujos dígitos estão todos lá e na ordem certa ("14.0.4.26" =
+# 14/04/26). Condições deliberadamente estreitas:
+#   - o texto tem de ser SÓ dígitos e separadores de data (nenhuma letra,
+#     nenhum espaço) -- uma caixa com data e hora coladas ("14.04 -26
+#     90:24") não entra aqui, e continua sendo tratada por
+#     `tentar_separar_data_hora_mesclada`;
+#   - tem de haver ao menos um separador (um bloco de 6 dígitos sozinho
+#     poderia ser uma matrícula, não uma data);
+#   - a quantidade de dígitos tem de ser exatamente 6 (ddmmaa) ou 8
+#     (ddmmaaaa) -- qualquer outra quantidade é ambígua e é recusada.
+# Nenhum dígito é inventado: só se ignora onde os separadores caíram. O
+# resultado ainda passa pela mesma validação de calendário.
+_RE_DATA_SO_DIGITOS_E_SEPARADORES = re.compile(rf"^\s*\d+(?:{_SEP_DATA}\d+)+\s*$")
+
+# O espaço entra na classe de separadores de HORA:MINUTO porque o OCR real
+# APAGA o separador da hora manuscrita ("07 53" no lugar de "07:53"). Isso
+# não afrouxa a validação: continua exigindo separador (um "0753" colado,
+# sem nada entre os dois blocos, continua recusado por ambíguo) e os dois
+# números continuam tendo de formar uma hora possível. O separador dos
+# SEGUNDOS não ganhou o espaço de propósito -- não há caso observado, e
+# aceitá-lo faria "23 04 26" (uma data) passar por hora 23:04:26.
 _RE_HORA = re.compile(
-    r"^\s*(\d{1,2})\s*[:hH.]\s*(\d{2})\s*(?:[:mM.]\s*(\d{2}))?\s*$"
+    r"^\s*(\d{1,2})\s*[:hH.\s]\s*(\d{2})\s*(?:[:mM.]\s*(\d{2}))?\s*$"
 )
 
 # Versões "embutidas" (não ancoradas com ^$, aceitam espaço como separador
@@ -80,8 +115,30 @@ _RE_HORA = re.compile(
 # um trecho candidato dentro de um texto maior -- nunca para validar. A
 # validação de verdade continua sendo sempre `_RE_DATA`/`_RE_HORA` via
 # `interpretar_data`/`interpretar_hora`.
+#
+# O separador da hora aparece DUPLICADO em leituras reais ("14.:08"), daí
+# o `{1,2}`: continua sendo um separador só, lido duas vezes pelo OCR.
 _RE_DATA_EMBUTIDA = re.compile(r"(\d{1,2})\s*[./\-\s]\s*(\d{1,2})\s*[./\-\s]\s*(\d{2}|\d{4})")
-_RE_HORA_EMBUTIDA = re.compile(r"(\d{1,2})\s*[:hH.]\s*(\d{2})(?:\s*[:mM.]\s*(\d{2}))?")
+_RE_HORA_EMBUTIDA = re.compile(r"(\d{1,2})\s*[:hH.]{1,2}\s*(\d{2})(?:\s*[:mM.]\s*(\d{2}))?")
+
+
+def _partes_de_data_deformada(texto: str):
+    """
+    Último recurso de `interpretar_data` para uma data cujo SEPARADOR o
+    OCR deformou ("14.0.4.26"). Devolve `(dia, mes, ano)` como texto, ou
+    None quando as condições estreitas de
+    `_RE_DATA_SO_DIGITOS_E_SEPARADORES` não são atendidas. Não valida
+    calendário -- quem chama já faz isso logo em seguida.
+    """
+    if not _RE_DATA_SO_DIGITOS_E_SEPARADORES.match(texto):
+        return None
+
+    digitos = "".join(c for c in texto if c.isdigit())
+    if len(digitos) == 6:
+        return digitos[0:2], digitos[2:4], digitos[4:6]
+    if len(digitos) == 8:
+        return digitos[0:2], digitos[2:4], digitos[4:8]
+    return None
 
 
 def interpretar_data(texto: Optional[str]) -> Optional[date]:
@@ -95,10 +152,13 @@ def interpretar_data(texto: Optional[str]) -> Optional[date]:
 
     texto = texto.strip()
     correspondencia = _RE_DATA.match(texto) or _RE_DATA_MES_ANO_COLADOS.match(texto)
-    if not correspondencia:
-        return None
-
-    dia_str, mes_str, ano_str = correspondencia.groups()
+    if correspondencia:
+        dia_str, mes_str, ano_str = correspondencia.groups()
+    else:
+        partes = _partes_de_data_deformada(texto)
+        if partes is None:
+            return None
+        dia_str, mes_str, ano_str = partes
     dia, mes, ano = int(dia_str), int(mes_str), int(ano_str)
     if len(ano_str) == 2:
         ano += 2000
@@ -107,6 +167,37 @@ def interpretar_data(texto: Optional[str]) -> Optional[date]:
         return date(ano, mes, dia)
     except ValueError:
         return None  # data impossível (ex.: 31/04, mês 13, dia 32...)
+
+
+def interpretar_data_sem_ano(texto: Optional[str]):
+    """
+    Reconhece um texto de data SEM ano ("23.04", "23/04", "14-04") e
+    devolve `(dia, mes)`, ou None quando o texto não tem essa estrutura ou
+    quando dia/mês estão fora de faixa.
+
+    Isto NÃO é uma data: sozinha, ela continua sem poder ser validada, e
+    `interpretar_data` continua devolvendo None para o mesmo texto. A
+    função existe só para que quem tem CONTEXTO REAL do lote (ver
+    `parsing/contexto_lote.py`) possa completar o ano a partir das outras
+    folhas do mesmo lote — evidência externa e verificável, não uma
+    suposição. Este módulo, sozinho, nunca completa ano nenhum.
+
+    A faixa de dia/mês é checada aqui só para descartar o que é
+    impossível em qualquer ano (dia 0/32, mês 0/13); a validade de
+    calendário de verdade (29/02, 31/04) só pode ser decidida com o ano,
+    e acontece depois, em `interpretar_data`.
+    """
+    if not texto or not texto.strip():
+        return None
+
+    correspondencia = _RE_DATA_SEM_ANO.match(texto.strip())
+    if not correspondencia:
+        return None
+
+    dia, mes = int(correspondencia.group(1)), int(correspondencia.group(2))
+    if not (1 <= dia <= 31 and 1 <= mes <= 12):
+        return None
+    return dia, mes
 
 
 def formatar_data_dd_mm_aa(data: date) -> str:
@@ -176,6 +267,46 @@ def normalizar_hora(texto: Optional[str]) -> Optional[str]:
     return formatar_hora_hh_mm(hora) if hora is not None else None
 
 
+def recuperar_hora(texto: Optional[str]) -> Optional[str]:
+    """
+    `normalizar_hora` com UMA recuperação a mais: o caso real em que o
+    detector do OCR colou a hora a um texto vizinho na mesma caixa
+    ("12:55 Miguel", "11:06 Faina") -- o mesmo artefato de caixa mesclada
+    que `tentar_separar_data_hora_mesclada` trata para DATA+HORA, aqui na
+    versão "hora + texto que não é número".
+
+    Condições estreitas, para não transformar qualquer texto com números
+    em hora:
+        - o texto contém EXATAMENTE UM trecho com forma de hora (dois
+          trechos = ambíguo, ninguém escolhe);
+        - o que sobra depois de tirar esse trecho NÃO tem nenhum dígito
+          (se tiver, os dígitos restantes podem ser parte da hora de
+          verdade, e aí não há leitura segura);
+        - e o trecho encontrado ainda passa por `interpretar_hora`, a
+          mesma validação estrita de sempre ("90:24" continua recusado).
+
+    Devolve `HH:MM` ou None. Nenhum dígito é inventado.
+    """
+    normalizada = normalizar_hora(texto)
+    if normalizada is not None:
+        return normalizada
+
+    if not texto or not texto.strip():
+        return None
+
+    encontrados = list(_RE_HORA_EMBUTIDA.finditer(texto))
+    if len(encontrados) != 1:
+        return None
+
+    correspondencia = encontrados[0]
+    resto = texto[: correspondencia.start()] + texto[correspondencia.end():]
+    if any(c.isdigit() for c in resto):
+        return None
+
+    hora, minuto, segundo = correspondencia.groups()
+    return normalizar_hora(f"{hora}:{minuto}" + (f":{segundo}" if segundo else ""))
+
+
 def interpretar_data_hora(texto_data: Optional[str], texto_hora: Optional[str]) -> Optional[datetime]:
     """
     Combina data + hora em um único `datetime`. Devolve None se qualquer
@@ -216,7 +347,10 @@ def tentar_separar_data_hora_mesclada(texto: Optional[str]):
     para REVISAO via `validar_data`; HORA ausente é aceitável, ver
     `avaliar_hora_opcional`. Nunca inventa um valor).
 
-    Devolve (texto_data_canonico, texto_hora_canonico) ou None.
+    Devolve `(texto_data_canonico, texto_hora_canonico)` ou None. A hora
+    vem como None quando a caixa mesclada tinha mesmo um trecho de hora,
+    só que impossível: aí a DATA legível é aproveitada e a HORA (campo
+    opcional) simplesmente não existe -- nunca sai com o texto impossível.
     """
     if not texto or not texto.strip():
         return None
@@ -240,8 +374,15 @@ def tentar_separar_data_hora_mesclada(texto: Optional[str]):
 
     if interpretar_data(texto_data_canonico) is None:
         return None
+
     if interpretar_hora(texto_hora_canonico) is None:
-        return None
+        # A DATA é boa e a caixa comprovadamente misturava data e hora (o
+        # trecho com forma de hora está lá), só que a hora saiu impossível
+        # ("14.04 -26 90:24"). Recusar a separação inteira faria a DATA
+        # legível ser perdida por causa da HORA -- e a hora é o campo
+        # OPCIONAL. Devolve só a data; a hora fica AUSENTE (nunca com o
+        # texto impossível, que seria indistinguível de uma hora real).
+        return texto_data_canonico, None
 
     return texto_data_canonico, texto_hora_canonico
 
@@ -280,13 +421,15 @@ def avaliar_hora_opcional(texto_hora: Optional[str]) -> Optional[str]:
           nunca escreve o texto ilegível na planilha (seria indistinguível
           de uma hora real), mas também nunca o descarta em silêncio.
 
-    Para saber SE a hora pode ser usada, quem chama usa `interpretar_hora`
-    (None = não usar). Esta função só produz o texto do aviso.
+    Para saber SE a hora pode ser usada, quem chama usa `recuperar_hora`
+    (None = não usar). Esta função só produz o texto do aviso, e usa a
+    MESMA função para decidir se há algo a avisar -- uma hora que a
+    recuperação conseguiu ler não é "ilegível" e não gera aviso.
     """
     if not (texto_hora and texto_hora.strip()):
         return None  # hora ausente é aceitável: campo opcional
 
-    if interpretar_hora(texto_hora) is None:
+    if recuperar_hora(texto_hora) is None:
         return f"hora ilegível, exportada em branco (texto do OCR: '{texto_hora}')"
 
     return None

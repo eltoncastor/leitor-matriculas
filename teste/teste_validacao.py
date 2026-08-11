@@ -30,14 +30,33 @@ def _campos_tempo_validos():
     }
 
 
+def _campos_preenchidos():
+    """
+    MOTIVO e RESPONSÁVEL PRESENTES (com qualquer texto). São campos
+    obrigatórios da folha: ausentes, mandam o registro para REVISAO por si
+    só (ver teste_responsavel_ausente/teste_motivo_ausente). Os testes que
+    não são sobre esses dois campos precisam deles preenchidos para isolar
+    a condição que realmente estão testando -- mesma razão de
+    `_campos_tempo_validos`. O texto em si não importa aqui: com
+    `_DMFalso()` sem listas, a base não está disponível e nenhum dos dois
+    é comparado contra nada.
+    """
+    return {
+        "gestor": CampoOcr("Fulano", 0.9, None),
+        "motivo": CampoOcr("Motivo qualquer", 0.9, None),
+    }
+
+
 def _reg(campos, com_tempo_valido=True):
     """
-    Monta um Registro de teste. Por padrão, injeta data/hora válidas (para
-    isolar, nos testes que não são sobre data/hora, a condição que
-    realmente está sendo testada) -- passe com_tempo_valido=False e
-    inclua "data"/"hora" em `campos` para testar cenários de data/hora.
+    Monta um Registro de teste. Por padrão, injeta data/hora válidas e
+    motivo/responsável preenchidos (para isolar, nos testes que não são
+    sobre esses campos, a condição que realmente está sendo testada) --
+    passe com_tempo_valido=False e inclua "data"/"hora" em `campos` para
+    testar cenários de data/hora.
     """
     base = _campos_tempo_validos() if com_tempo_valido else {}
+    base.update(_campos_preenchidos())
     base.update(campos)
     return Registro(indice=1, campos=base)
 

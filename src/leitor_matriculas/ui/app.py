@@ -32,6 +32,7 @@ from leitor_matriculas.parsing.registro_parser import (
     parse_registros,
     verificar_contagem_posicoes,
 )
+from leitor_matriculas.parsing.contexto_lote import ContextoLote
 from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
 from leitor_matriculas.validacao.regras import classificar_registro
 from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
@@ -106,7 +107,14 @@ def _reparar_data_hora_mescladas(registros):
 
         texto_data, texto_hora = resultado
         registro.campos["data"] = CampoOcr(texto=texto_data, confianca=campo_fonte.confianca, box=campo_fonte.box)
-        registro.campos["hora"] = CampoOcr(texto=texto_hora, confianca=campo_fonte.confianca, box=campo_fonte.box)
+        # `texto_hora` vem None quando a caixa mesclada tinha uma hora
+        # impossível ("14.04 -26 90:24"): a DATA legível é aproveitada e a
+        # HORA (opcional) continua ausente -- o texto impossível nunca vai
+        # para o campo, só para o registro de auditoria logo abaixo.
+        if texto_hora is None:
+            registro.campos.pop("hora", None)
+        else:
+            registro.campos["hora"] = CampoOcr(texto=texto_hora, confianca=campo_fonte.confianca, box=campo_fonte.box)
         # Preserva o texto mesclado original para auditoria (nunca some).
         registro.nao_associados.append(
             CampoOcr(texto=f"[data/hora mescladas no OCR: {campo_fonte.texto!r}]", confianca=campo_fonte.confianca, box=campo_fonte.box)
@@ -122,6 +130,11 @@ class App(tk.Tk):
 
         self._ocr_engine = None
         self._data_manager = DataManager()
+        # Contexto acumulado do lote (hoje: o ano das datas já lidas), usado
+        # para completar uma DATA que o OCR entregou sem ano. Vive junto com
+        # os resultados: é zerado no "Limpar resultados", nunca atravessa
+        # dois lotes diferentes.
+        self._contexto_lote = ContextoLote()
 
         self._imagem_original = None
         self._imagem_processada = None
@@ -520,6 +533,15 @@ class App(tk.Tk):
         }
 
     def _adicionar_registros(self, numero_pagina, registros):
+        # Contexto do lote ANTES de classificar: as datas completas desta
+        # página também valem como evidência para as linhas dela que vieram
+        # sem ano. Só entram datas que se interpretam por completo (ver
+        # ContextoLote.registrar_data) -- uma data recuperada por contexto
+        # nunca realimenta o contexto.
+        for registro in registros:
+            campo_data = registro.campos.get("data")
+            self._contexto_lote.registrar_data(campo_data.texto if campo_data else "")
+
         for registro in registros:
             campo_matricula = registro.campos.get("matricula")
             texto_matricula = campo_matricula.texto if campo_matricula else ""
@@ -550,6 +572,7 @@ class App(tk.Tk):
             resultado_classificacao = classificar_registro(
                 registro, colaborador, self._data_manager,
                 resultado_matricula=resultado_matricula,
+                contexto_lote=self._contexto_lote,
             )
             status, observacao = resultado_classificacao.status, resultado_classificacao.observacao
             if status == "CONFIRMADO":
@@ -678,6 +701,10 @@ class App(tk.Tk):
         self._total_paginas_lote = None
         self._paginas_processadas_lote = 0
         self._proximo_numero_pagina = 1
+        # O contexto do lote é evidência das folhas que estavam na tabela:
+        # limpar os resultados tem de limpá-lo junto, senão o ano de um lote
+        # completaria datas do lote seguinte.
+        self._contexto_lote = ContextoLote()
         self.btn_salvar.config(state="disabled")
         self.btn_revisao.config(text="Abrir revisão (0)", state="disabled")
         self.btn_erros_pag.config(text="Erros de página (0)", state="disabled")
@@ -885,6 +912,7 @@ class App(tk.Tk):
             resultado = classificar_registro(
                 registro_sintetico, colaborador, self._data_manager,
                 resultado_matricula=resultado_matricula,
+                contexto_lote=self._contexto_lote,
             )
 
             registro["matricula"] = matricula_normalizada

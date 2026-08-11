@@ -66,7 +66,7 @@ from leitor_matriculas.parsing.registro_parser import Registro
 from leitor_matriculas.parsing.tempo_parser import (
     avaliar_hora_opcional,
     normalizar_data,
-    normalizar_hora,
+    recuperar_hora,
     validar_data,
 )
 from leitor_matriculas.validacao.correspondencia_aproximada import (
@@ -175,6 +175,7 @@ def classificar_registro(
     colaborador: Optional[dict],
     data_manager,
     resultado_matricula=None,
+    contexto_lote=None,
 ) -> ResultadoValidacao:
     """
     Devolve um ResultadoValidacao; status in {"CONFIRMADO","REVISAO"}.
@@ -186,6 +187,12 @@ def classificar_registro(
     ele, o comportamento é exatamente o anterior — o parâmetro só
     acrescenta o bloqueio por ambiguidade e a nota de recuperação na
     observação.
+
+    `contexto_lote` (opcional) é o `ContextoLote`
+    (`parsing/contexto_lote.py`) com o que as outras folhas do MESMO lote
+    já comprovaram — hoje, só o ano. Também é opcional de propósito: sem
+    ele, uma data sem ano continua indo para REVISAO exatamente como
+    antes.
     """
     # HORA é opcional e NUNCA bloqueia: é avaliada primeiro, uma única vez,
     # e o resultado acompanha TODOS os retornos abaixo -- inclusive os de
@@ -195,7 +202,7 @@ def classificar_registro(
     # a planilha nunca repete o separador que o OCR leu ("18.59" -> "18:59").
     campo_hora_reg = registro.campos.get("hora")
     texto_hora = campo_hora_reg.texto if campo_hora_reg else ""
-    hora_confirmada = normalizar_hora(texto_hora)
+    hora_confirmada = recuperar_hora(texto_hora)
     aviso_hora = avaliar_hora_opcional(texto_hora)
 
     # DATA canônica (dd/mm/aa) -- calculada uma vez e devolvida em todos os
@@ -205,6 +212,22 @@ def classificar_registro(
     campo_data = registro.campos.get("data")
     texto_data = campo_data.texto if campo_data else ""
     data_confirmada = normalizar_data(texto_data)
+
+    # DATA SEM ANO ("23.04"): o ano não está escrito nesta linha, mas pode
+    # estar escrito nas OUTRAS folhas do mesmo lote. Quando quem chama
+    # passa um `contexto_lote` e ele tem evidência suficiente (ver
+    # parsing/contexto_lote.py), o ano é completado a partir dele -- não é
+    # suposição, é dado lido em outra folha, e fica registrado na
+    # Observação junto com o texto original do OCR.
+    aviso_data = None
+    if data_confirmada is None and contexto_lote is not None:
+        data_por_contexto = contexto_lote.completar_ano(texto_data)
+        if data_por_contexto:
+            data_confirmada = data_por_contexto
+            aviso_data = (
+                f"data '{texto_data}' sem ano no OCR: ano completado pelo contexto do lote "
+                f"-> {data_por_contexto}"
+            )
 
     matricula_confirmada = None
     if resultado_matricula is not None and resultado_matricula.matricula:
@@ -228,9 +251,19 @@ def classificar_registro(
     erros_campos = []
     avisos_campos = []
 
+    # Campo AUSENTE não é campo "sem problema": MOTIVO e RESPONSÁVEL são
+    # dois dos cinco campos manuscritos que a folha registra, e uma
+    # liberação sem nenhum dos dois não é uma liberação conferida -- é uma
+    # linha que o OCR não conseguiu ler. Antes isso passava despercebido
+    # porque a coluna vazia simplesmente não entrava na avaliação, e o
+    # registro podia sair CONFIRMADO com a célula em branco (indistinguível
+    # de "confirmadamente vazio"). Só ficou visível nesta fase, quando as
+    # normalizações de motivo deixaram de barrar essas linhas antes.
     gestor_confirmado = None
     campo_gestor = registro.campos.get("gestor")
-    if campo_gestor and data_manager.gestores_disponivel:
+    if not (campo_gestor and campo_gestor.texto and campo_gestor.texto.strip()):
+        erros_campos.append("responsável não identificado pelo OCR")
+    elif data_manager.gestores_disponivel:
         resultado_responsavel = resolver_responsavel(campo_gestor.texto, data_manager.listar_gestores())
         if resultado_responsavel.status in ("EXATA", "APROXIMADA"):
             gestor_confirmado = resultado_responsavel.gestor_confirmado
@@ -249,7 +282,9 @@ def classificar_registro(
 
     motivo_confirmado = None
     campo_motivo = registro.campos.get("motivo")
-    if campo_motivo and data_manager.motivos_disponivel:
+    if not (campo_motivo and campo_motivo.texto and campo_motivo.texto.strip()):
+        erros_campos.append("motivo não identificado pelo OCR")
+    elif data_manager.motivos_disponivel:
         motivo_confirmado, aviso_motivo, erro_motivo = _resolver_motivo_do_registro(
             campo_motivo, data_manager.listar_motivos()
         )
@@ -272,16 +307,33 @@ def classificar_registro(
         normalização de motivo/responsável vão junto: eles carregam o
         texto CRU do OCR, que sai das colunas normalizadas e não pode
         sumir da auditoria."""
-        partes = [motivo_do_bloqueio] + avisos_campos
+        partes = [motivo_do_bloqueio] + ([aviso_data] if aviso_data else []) + avisos_campos
         return _resultado("REVISAO", "; ".join(partes))
 
     if not registro.completo:
         return _bloqueio("matrícula não identificada pelo OCR")
 
-    # DATA é obrigatória: esta continua sendo uma checagem bloqueante.
-    erro_data = validar_data(texto_data)
-    if erro_data:
-        return _bloqueio(erro_data)
+    # DATA é obrigatória: esta continua sendo uma checagem bloqueante. O
+    # que bloqueia é não haver DATA CANÔNICA -- o que inclui o ano
+    # completado pelo contexto do lote, quando houve. `validar_data` é
+    # chamada só para produzir a mensagem, exatamente como antes.
+    if data_confirmada is None:
+        return _bloqueio(validar_data(texto_data))
+
+    # O outro lado do contexto do lote: o ano ESTÁ escrito, a data é
+    # válida, mas o ano destoa de todas as outras folhas da remessa
+    # (ex.: "28/04/20" entre trinta datas de 2026). Ele não é reescrito --
+    # seria inventar --, mas também não pode ser CONFIRMADO sem alguém
+    # conferir o papel: uma data errada confirmada é justamente o erro que
+    # ninguém mais pega depois.
+    if contexto_lote is not None:
+        ano_divergente = contexto_lote.ano_divergente_do_lote(texto_data)
+        if ano_divergente is not None:
+            return _bloqueio(
+                f"ano da data ({ano_divergente}) destoa do restante do lote "
+                f"({contexto_lote.ano_do_lote()}) -- conferir no papel; "
+                f"texto do OCR: '{texto_data}'"
+            )
 
     campo_matricula = registro.campos["matricula"]
 
@@ -317,6 +369,11 @@ def classificar_registro(
     # documenta na Observação por que a célula Hora saiu em branco, sem
     # jamais derrubar o registro para REVISAO.
     avisos = [aviso_hora] if aviso_hora else []
+    # O ano completado pelo contexto do lote fica SEMPRE registrado, com o
+    # texto original do OCR junto: quem conferir a planilha contra o papel
+    # precisa poder ver que aquele ano não estava escrito naquela linha.
+    if aviso_data:
+        avisos.append(aviso_data)
     # Recuperação da matrícula aceita (ex.: "+" lido como 7, confirmado
     # por existir só essa leitura na base) fica registrada na Observação
     # -- o operador precisa poder ver que aquele número foi corrigido.
