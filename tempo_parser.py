@@ -7,8 +7,19 @@ REGRA DE OURO (requisito funcional definitivo): nunca corrigir ou inventar
 um valor de data/hora só porque existe uma hipótese provável. Um texto que
 não possa ser interpretado com segurança — formato inesperado, campo
 vazio, data/hora impossível, ano ausente/ambíguo — devolve None. Quem
-chama (validacao.py) decide o que fazer com isso, e a decisão é sempre
-REVISAO; este módulo nunca "adivinha".
+chama (validacao.py) decide o que fazer com isso; este módulo nunca
+"adivinha".
+
+DATA É OBRIGATÓRIA, HORA É OPCIONAL (requisito funcional definitivo):
+    - DATA que não possa ser interpretada com segurança BLOQUEIA a
+      confirmação (-> REVISAO). Ver `validar_data`.
+    - HORA NUNCA bloqueia a confirmação. Ausente ou ilegível, o registro
+      ainda pode ser CONFIRMADO desde que data/matrícula/motivo/
+      responsável estejam confirmados. Ver `avaliar_hora_opcional`.
+      Quando a hora não puder ser reconhecida com segurança, o campo sai
+      VAZIO na planilha — nunca com o texto ilegível do OCR, que seria
+      indistinguível de uma hora de verdade (o texto bruto continua
+      preservado na Observação, para auditoria: não some em silêncio).
 
 Formatos aceitos:
     DATA: dd/mm/aaaa, dd/mm/aa, dd-mm-aaaa, dd-mm-aa, dd.mm.aaaa, dd.mm.aa
@@ -21,8 +32,7 @@ Formatos aceitos:
           (hh:mm:ss).
 
 Este módulo não sabe nada sobre OCR, registros ou a folha — só interpreta
-texto já extraído. Fica combinado (via `interpretar_data_hora`) apenas
-para servir de chave de ordenação cronológica.
+texto já extraído.
 
 `tentar_separar_data_hora_mesclada` (Fase 1 de precisão da extração)
 trata um caso real observado: o detector de texto do OCR às vezes cola
@@ -99,10 +109,15 @@ def interpretar_hora(texto: Optional[str]) -> Optional[time]:
 
 def interpretar_data_hora(texto_data: Optional[str], texto_hora: Optional[str]) -> Optional[datetime]:
     """
-    Combina data + hora em um único `datetime`, para uso como chave de
-    ordenação cronológica. Devolve None se qualquer um dos dois não puder
-    ser interpretado com segurança (nunca combina um válido com um
-    "chute" para o outro).
+    Combina data + hora em um único `datetime`. Devolve None se qualquer
+    um dos dois não puder ser interpretado com segurança (nunca combina um
+    válido com um "chute" para o outro).
+
+    NOTA: nenhum módulo de produção usa esta função hoje. Ela existia para
+    servir de chave da ordenação cronológica do XLSX, que foi REMOVIDA (a
+    planilha preserva a ordem física da folha — ver xlsx_exporter.py).
+    Mantida por ser utilitário legítimo e coberto por teste; se continuar
+    sem uso, é candidata a remoção na limpeza de código morto.
     """
     data = interpretar_data(texto_data)
     hora = interpretar_hora(texto_hora)
@@ -128,8 +143,9 @@ def tentar_separar_data_hora_mesclada(texto: Optional[str]):
     sistema, não uma cópia mais permissiva dela.
 
     Se qualquer uma dessas condições falhar, devolve None -- quem chama
-    mantém o campo como estava (ausente continua ausente -> REVISAO via
-    `validar_data_hora`; nunca inventa um valor).
+    mantém o campo como estava (ausente continua ausente: DATA ausente vai
+    para REVISAO via `validar_data`; HORA ausente é aceitável, ver
+    `avaliar_hora_opcional`. Nunca inventa um valor).
 
     Devolve (texto_data_canonico, texto_hora_canonico) ou None.
     """
@@ -161,35 +177,47 @@ def tentar_separar_data_hora_mesclada(texto: Optional[str]):
     return texto_data_canonico, texto_hora_canonico
 
 
-def validar_data_hora(texto_data: Optional[str], texto_hora: Optional[str]) -> Optional[str]:
+def validar_data(texto_data: Optional[str]) -> Optional[str]:
     """
-    Verifica se DATA e HORA (textos já extraídos pelo OCR) podem ser
-    interpretados com segurança.
+    Verifica se a DATA (texto já extraído pelo OCR) pode ser interpretada
+    com segurança. A data É OBRIGATÓRIA: esta é uma checagem BLOQUEANTE.
 
-    Devolve None se ambos forem válidos, ou uma mensagem de observação
+    Devolve None quando a data é válida, ou uma mensagem de observação
     (para status REVISAO) explicando o que não pôde ser confirmado —
-    cobrindo os casos exigidos: data ilegível, data impossível, hora
-    ilegível, hora impossível, formato inesperado, campo vazio, e
-    combinação que não possa ser interpretada com segurança.
+    cobrindo campo vazio, formato inesperado, data impossível e ano
+    ausente.
     """
-    data_vazia = not (texto_data and texto_data.strip())
-    hora_vazia = not (texto_hora and texto_hora.strip())
-
-    if data_vazia and hora_vazia:
-        return "data e hora não identificadas pelo OCR"
-    if data_vazia:
+    if not (texto_data and texto_data.strip()):
         return "data não identificada pelo OCR"
-    if hora_vazia:
-        return "hora não identificada pelo OCR"
 
-    data = interpretar_data(texto_data)
-    hora = interpretar_hora(texto_hora)
-
-    if data is None and hora is None:
-        return f"data ('{texto_data}') e hora ('{texto_hora}') não puderam ser interpretadas com segurança"
-    if data is None:
+    if interpretar_data(texto_data) is None:
         return f"data não pôde ser interpretada com segurança: '{texto_data}'"
-    if hora is None:
-        return f"hora não pôde ser interpretada com segurança: '{texto_hora}'"
+
+    return None
+
+
+def avaliar_hora_opcional(texto_hora: Optional[str]) -> Optional[str]:
+    """
+    Avalia a HORA, que é OPCIONAL (requisito funcional definitivo): esta
+    checagem NUNCA bloqueia a confirmação de um registro.
+
+    Devolve:
+        - None quando a hora está ausente (caso normal e aceitável — a
+          folha simplesmente não teve a hora preenchida/legível) OU quando
+          ela é válida. Em ambos os casos não há nada a observar.
+        - uma mensagem de AVISO (não de erro) quando existe texto na
+          coluna HORA mas ele não pôde ser interpretado com segurança. Quem
+          chama registra isso na Observação e deixa o campo Hora VAZIO —
+          nunca escreve o texto ilegível na planilha (seria indistinguível
+          de uma hora real), mas também nunca o descarta em silêncio.
+
+    Para saber SE a hora pode ser usada, quem chama usa `interpretar_hora`
+    (None = não usar). Esta função só produz o texto do aviso.
+    """
+    if not (texto_hora and texto_hora.strip()):
+        return None  # hora ausente é aceitável: campo opcional
+
+    if interpretar_hora(texto_hora) is None:
+        return f"hora ilegível, exportada em branco (texto do OCR: '{texto_hora}')"
 
     return None

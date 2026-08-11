@@ -12,23 +12,22 @@ Setor, Motivo, Responsável pela autorização. As demais colunas (Cargo,
 Página, Status, confianças, Observação, texto OCR original) são
 informação técnica/auditoria, mantida depois das 7 principais.
 
-ORDENAÇÃO (requisito funcional definitivo): antes de gravar, os registros
-são reordenados cronologicamente por DATA+HORA reais (não por texto/ordem
-de página) — ver `tempo_parser.interpretar_data_hora`. Registros cuja
-data/hora não puderam ser interpretadas com segurança vão para o final,
-na ordem em que já estavam, sem serem descartados.
+ORDEM (requisito funcional definitivo): a ordem FÍSICA das liberações na
+folha é preservada. Este módulo NÃO reordena nada — grava exatamente na
+ordem em que os registros chegam, que é a ordem de leitura da página (o
+parser espacial devolve as linhas de cima para baixo) e das páginas entre
+si. Não ordena por data/hora, nome, matrícula, gestor nem motivo: a
+sequência física do papel é a referência da saída, e é o que permite
+conferir a planilha contra a folha linha a linha.
 """
 
 import os
-from datetime import datetime
 from typing import Dict, List
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
-
-from tempo_parser import interpretar_data_hora
 
 COLUNAS = [
     ("data", "Data"),
@@ -96,37 +95,6 @@ def _aplicar_tabela(ws, nome_tabela: str):
     ws.freeze_panes = "A2"
 
 
-def _chave_ordenacao_cronologica(item):
-    """
-    Chave de ordenação para um par (índice_original, registro).
-
-    (sem_data_valida, momento, índice_original):
-        - sem_data_valida (bool): False (0) para registros com data/hora
-          interpretáveis vem primeiro; True (1) — sem data/hora confiável —
-          vai para o final.
-        - momento: o datetime real (comparação cronológica de verdade, não
-          de texto); datetime.max para quem não tem, só para não quebrar a
-          comparação (o agrupamento acima já garante que fica no final).
-        - índice_original: desempate estável — preserva a ordem relativa
-          original entre registros do mesmo grupo (nunca embaralha por
-          hipótese).
-    """
-    indice, registro = item
-    momento = interpretar_data_hora(registro.get("data"), registro.get("hora"))
-    return (momento is None, momento or datetime.max, indice)
-
-
-def _ordenar_cronologicamente(registros: List[Dict]) -> List[Dict]:
-    """
-    Devolve uma NOVA lista com os registros ordenados por data+hora reais,
-    do mais antigo para o mais recente. Registros sem data/hora confiável
-    vão para o final (preservados, nunca descartados), na ordem em que já
-    estavam entre si.
-    """
-    indexados = sorted(enumerate(registros), key=_chave_ordenacao_cronologica)
-    return [registro for _, registro in indexados]
-
-
 def _aba_resumo(wb, registros, paginas_processadas, paginas_com_erro, paginas_com_contagem_divergente=0):
     ws = wb.create_sheet("Resumo")
     ws.append(["Resumo"])
@@ -176,8 +144,11 @@ def export_to_xlsx(
     """
     registros: lista de dicts com as chaves de COLUNAS (mais 'status' com
     valor "CONFIRMADO"/"REVISAO"/"ERRO"). Cria/sobrescreve o arquivo em
-    `caminho` com 3 abas: Liberações (tudo, ordenado cronologicamente),
-    Revisão (REVISAO + ERRO, mesma ordem cronológica), Resumo (contagens).
+    `caminho` com 3 abas: Liberações (tudo, na ordem física da folha),
+    Revisão (REVISAO + ERRO, na mesma ordem física), Resumo (contagens).
+
+    A ordem de `registros` é preservada exatamente como recebida — ver a
+    seção ORDEM no topo do módulo.
     """
     if not registros:
         raise ValueError("Nenhum registro para exportar.")
@@ -185,8 +156,6 @@ def export_to_xlsx(
     diretorio = os.path.dirname(os.path.abspath(caminho))
     if diretorio and not os.path.isdir(diretorio):
         raise FileNotFoundError(f"Pasta de destino não encontrada: {diretorio}")
-
-    registros = _ordenar_cronologicamente(registros)
 
     wb = Workbook()
     ws_lib = wb.active

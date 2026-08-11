@@ -18,7 +18,8 @@ from tempo_parser import (  # noqa: E402
     interpretar_data,
     interpretar_hora,
     interpretar_data_hora,
-    validar_data_hora,
+    validar_data,
+    avaliar_hora_opcional,
 )
 
 
@@ -101,30 +102,58 @@ def teste_interpretar_data_hora_combinado():
     print()
 
 
-def teste_validar_data_hora_mensagens():
-    print("=== Teste 9: validar_data_hora devolve None quando válido, mensagem quando não ===")
-    assert validar_data_hora("23/04/2026", "11:05") is None  # válido -> sem observação
+def teste_validar_data_e_bloqueante():
+    print("=== Teste 9: validar_data (DATA é obrigatória -> bloqueia) ===")
+    assert validar_data("23/04/2026") is None  # válida -> sem observação
 
-    msg_vazios = validar_data_hora("", "")
-    assert msg_vazios and "data" in msg_vazios and "hora" in msg_vazios
+    msg_vazia = validar_data("")
+    assert msg_vazia and "data" in msg_vazia.lower()
 
-    msg_so_data = validar_data_hora("", "11:05")
-    assert msg_so_data and "data" in msg_so_data.lower()
+    msg_none = validar_data(None)
+    assert msg_none and "data" in msg_none.lower()
 
-    msg_so_hora = validar_data_hora("23/04/2026", "")
-    assert msg_so_hora and "hora" in msg_so_hora.lower()
-
-    msg_impossivel = validar_data_hora("31/04/2026", "11:05")
+    msg_impossivel = validar_data("31/04/2026")
     assert msg_impossivel is not None
 
-    print("  OK")
+    msg_sem_ano = validar_data("23/04")
+    assert msg_sem_ano is not None
+
+    msg_formato = validar_data("qualquer coisa")
+    assert msg_formato is not None
+
+    print("  OK: data ausente/impossível/sem ano/ilegível sempre devolve mensagem")
     print()
 
 
-def teste_ordenacao_usa_datetime_real_nao_texto():
-    print("=== Teste 10: comparação usa datetime real, não string (lexicográfico erraria) ===")
+def teste_avaliar_hora_opcional_nunca_bloqueia():
+    print("=== Teste 10: avaliar_hora_opcional (HORA é opcional -> nunca bloqueia) ===")
+    # Hora AUSENTE é situação aceitável: nada a observar.
+    assert avaliar_hora_opcional("") is None
+    assert avaliar_hora_opcional(None) is None
+    assert avaliar_hora_opcional("   ") is None
+
+    # Hora VÁLIDA: nada a observar.
+    assert avaliar_hora_opcional("11:05") is None
+    assert avaliar_hora_opcional("11h05") is None
+
+    # Hora PRESENTE mas ilegível/impossível: devolve AVISO (não erro), e o
+    # aviso precisa carregar o texto bruto do OCR para auditoria.
+    aviso_impossivel = avaliar_hora_opcional("25:99")
+    assert aviso_impossivel and "25:99" in aviso_impossivel
+
+    aviso_ilegivel = avaliar_hora_opcional("ilegivel")
+    assert aviso_ilegivel and "ilegivel" in aviso_ilegivel
+
+    print("  OK: ausente/válida -> sem aviso; presente e ilegível -> aviso com o texto bruto")
+    print()
+
+
+def teste_interpretar_data_hora_compara_datetime_real_nao_texto():
+    print("=== Teste 11: interpretar_data_hora compara datetime real, não string ===")
     # Comparação lexicográfica de "9/1/2026" vs "10/1/2026" erraria (texto
     # "10..." < "9..."); com datetime real, 9 de janeiro vem antes.
+    # NOTA: a planilha NÃO é mais ordenada cronologicamente (preserva a
+    # ordem física da folha). Este teste cobre só a semântica da função.
     d1 = interpretar_data_hora("09/01/2026", "10:00")
     d2 = interpretar_data_hora("10/01/2026", "08:00")
     assert d1 < d2
@@ -142,8 +171,9 @@ if __name__ == "__main__":
         teste_hora_formatos_validos,
         teste_hora_impossivel_ou_invalida,
         teste_interpretar_data_hora_combinado,
-        teste_validar_data_hora_mensagens,
-        teste_ordenacao_usa_datetime_real_nao_texto,
+        teste_validar_data_e_bloqueante,
+        teste_avaliar_hora_opcional_nunca_bloqueia,
+        teste_interpretar_data_hora_compara_datetime_real_nao_texto,
     ]
 
     falhas = 0

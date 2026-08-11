@@ -121,12 +121,18 @@ def teste_ordem_das_colunas_principais():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def teste_ordenacao_cronologica():
+def teste_ordem_fisica_da_folha_e_preservada():
+    """
+    REQUISITO FUNCIONAL DEFINITIVO: a ordem física das liberações na folha
+    é preservada. O exportador NÃO reordena cronologicamente -- data/hora
+    fora de ordem cronológica saem exatamente na ordem em que chegaram.
+    """
     tmp = tempfile.mkdtemp()
     try:
-        caminho = os.path.join(tmp, "saida_ordenada.xlsx")
-        # Mesmo exemplo do requisito funcional: fora de ordem na "página",
-        # deve sair ordenado por data+hora reais no XLSX.
+        caminho = os.path.join(tmp, "saida_ordem_fisica.xlsx")
+        # Datas/horas deliberadamente fora de ordem cronológica: uma
+        # ordenação por data+hora produziria [pagina2, pagina4, pagina3,
+        # pagina1]. A ordem de entrada tem de ser mantida intacta.
         registros = [
             _registro("CONFIRMADO", matricula="pagina1", data="15/08/2026", hora="16:10"),
             _registro("CONFIRMADO", matricula="pagina2", data="14/08/2026", hora="08:15"),
@@ -139,29 +145,54 @@ def teste_ordenacao_cronologica():
         ws = wb["Liberações"]
         # Coluna 3 = Matrícula (Data, Hora, Matrícula, ...)
         matriculas_na_ordem = [ws.cell(row=r, column=3).value for r in range(2, ws.max_row + 1)]
-        assert matriculas_na_ordem == ["pagina2", "pagina4", "pagina3", "pagina1"], matriculas_na_ordem
-        print("OK: registros exportados em ordem cronológica real (data+hora), não na ordem de página")
+        assert matriculas_na_ordem == ["pagina1", "pagina2", "pagina3", "pagina4"], matriculas_na_ordem
+        print("OK: ordem física da folha preservada (sem reordenação cronológica)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def teste_registros_sem_data_hora_confiavel_vao_para_o_final():
+def teste_registro_sem_hora_mantem_sua_posicao():
+    """
+    Com a HORA opcional, um registro sem hora é comum. Ele não pode ser
+    empurrado para o fim da planilha: mantém a posição física que tinha na
+    folha.
+    """
     tmp = tempfile.mkdtemp()
     try:
-        caminho = os.path.join(tmp, "saida_sem_data.xlsx")
+        caminho = os.path.join(tmp, "saida_sem_hora.xlsx")
         registros = [
-            _registro("REVISAO", matricula="sem-data", data="", hora=""),
-            _registro("CONFIRMADO", matricula="com-data", data="14/08/2026", hora="08:15"),
+            _registro("CONFIRMADO", matricula="sem-hora", data="14/08/2026", hora=""),
+            _registro("CONFIRMADO", matricula="com-hora", data="14/08/2026", hora="08:15"),
+            _registro("REVISAO", matricula="sem-data-nem-hora", data="", hora=""),
         ]
         export_to_xlsx(registros, caminho)
 
         wb = openpyxl.load_workbook(caminho)
         ws = wb["Liberações"]
         matriculas_na_ordem = [ws.cell(row=r, column=3).value for r in range(2, ws.max_row + 1)]
-        # O registro sem data/hora confiável vai para o final -- nunca é
-        # descartado, só reordenado por último.
-        assert matriculas_na_ordem == ["com-data", "sem-data"], matriculas_na_ordem
-        print("OK: registro sem data/hora confiável vai para o final, sem ser descartado")
+        # Nada é reordenado nem descartado: a ordem de entrada é a saída.
+        assert matriculas_na_ordem == ["sem-hora", "com-hora", "sem-data-nem-hora"], matriculas_na_ordem
+        print("OK: registro sem hora (e sem data) mantém a posição física, sem ir para o final")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def teste_aba_revisao_tambem_preserva_a_ordem_fisica():
+    tmp = tempfile.mkdtemp()
+    try:
+        caminho = os.path.join(tmp, "saida_revisao_ordem.xlsx")
+        registros = [
+            _registro("REVISAO", matricula="rev1", data="15/08/2026", hora="16:10"),
+            _registro("CONFIRMADO", matricula="ok1", data="14/08/2026", hora="08:15"),
+            _registro("REVISAO", matricula="rev2", data="14/08/2026", hora="07:42"),
+        ]
+        export_to_xlsx(registros, caminho)
+
+        wb = openpyxl.load_workbook(caminho)
+        ws = wb["Revisão"]
+        matriculas_na_ordem = [ws.cell(row=r, column=3).value for r in range(2, ws.max_row + 1)]
+        assert matriculas_na_ordem == ["rev1", "rev2"], matriculas_na_ordem
+        print("OK: aba Revisão preserva a ordem física (rev1 antes de rev2)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -58,6 +58,22 @@ Hora = vazia
 
 O sistema nunca inventa uma hora.
 
+Isso vale tanto para a Hora **ausente** quanto para a Hora **ilegível**. Nos dois casos o registro pode ser `CONFIRMADO` normalmente.
+
+Uma hora ilegível nunca é escrita na planilha: o texto reconhecido pelo OCR seria indistinguível de uma hora real. Mas ele também não é descartado — fica registrado na coluna `Observação`, para auditoria.
+
+Exemplo fictício:
+
+```text
+OCR na coluna HORA:  25:99
+Resultado:
+    Hora       = (vazia)
+    Status     = CONFIRMADO
+    Observação = hora ilegível, exportada em branco (texto do OCR: '25:99')
+```
+
+Quando a Hora existe e é legível, ela é preservada normalmente.
+
 ### Responsável
 
 O campo Responsável representa o gestor que autorizou a liberação.
@@ -392,7 +408,7 @@ python teste\teste_extracao_fase1.py
 python teste\teste_worker_imagem_falha.py
 ```
 
-A suíte atual possui **100 testes sintéticos + integração UI**, todos aprovados no último ciclo de estabilização.
+A suíte atual possui **105 testes sintéticos + integração UI**, todos aprovados no último ciclo de estabilização (Fase 2).
 
 Também foram realizados testes com PaddleOCR real sobre um conjunto de cinco folhas reais.
 

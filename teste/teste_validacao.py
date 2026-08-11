@@ -131,19 +131,52 @@ def teste_data_ausente():
     print("OK: data ausente -> REVISAO")
 
 
-def teste_hora_ausente():
+def teste_hora_ausente_nao_impede_confirmacao():
+    """
+    REQUISITO FUNCIONAL DEFINITIVO: a HORA é opcional. Com data, matrícula,
+    motivo e responsável confirmados, a ausência da hora NÃO impede o
+    CONFIRMADO.
+    """
+    colaborador = {"matricula": "28972", "nome": "X", "cargo": "Y", "setor": "Z"}
     r = _reg({"matricula": CampoOcr("28972", 0.95, None), "data": CampoOcr("23/04/2026", 0.9, None)},
              com_tempo_valido=False)
-    status, obs = classificar_registro(r, None, _DMFalso())
-    assert status == "REVISAO" and "hora" in obs.lower()
-    print("OK: hora ausente -> REVISAO")
+    resultado = classificar_registro(r, colaborador, _DMFalso())
+    assert resultado.status == "CONFIRMADO", resultado.observacao
+    # Hora ausente é situação normal: não gera nem aviso nem valor.
+    assert resultado.hora_confirmada is None
+    assert "hora" not in resultado.observacao.lower()
+    print("OK: hora ausente NÃO impede CONFIRMADO (campo opcional)")
 
 
-def teste_data_e_hora_ausentes():
+def teste_hora_ausente_com_data_ausente_bloqueia_so_pela_data():
+    """Sem data e sem hora, quem bloqueia é só a DATA -- a hora não entra."""
     r = _reg({"matricula": CampoOcr("28972", 0.95, None)}, com_tempo_valido=False)
     status, obs = classificar_registro(r, None, _DMFalso())
-    assert status == "REVISAO" and "data" in obs.lower() and "hora" in obs.lower()
-    print("OK: data e hora ausentes -> REVISAO")
+    assert status == "REVISAO" and "data" in obs.lower()
+    assert "hora" not in obs.lower(), f"a hora não pode ser motivo de revisão: {obs}"
+    print("OK: data e hora ausentes -> REVISAO apenas por causa da data")
+
+
+def teste_hora_valida_e_preservada():
+    """Quando a hora existe e é legível, é preservada normalmente."""
+    colaborador = {"matricula": "28972", "nome": "X", "cargo": "Y", "setor": "Z"}
+    r = _reg({"matricula": CampoOcr("28972", 0.95, None)})  # data/hora válidas por padrão
+    resultado = classificar_registro(r, colaborador, _DMFalso())
+    assert resultado.status == "CONFIRMADO"
+    assert resultado.hora_confirmada == "11:05", resultado.hora_confirmada
+    print("OK: hora válida é preservada em .hora_confirmada")
+
+
+def teste_hora_preservada_mesmo_em_registro_de_revisao():
+    """
+    Uma hora legítima não pode ser perdida só porque o registro foi para
+    REVISAO por outro motivo (ex.: matrícula não encontrada na base).
+    """
+    r = _reg({"matricula": CampoOcr("28972", 0.95, None)})
+    resultado = classificar_registro(r, None, _DMFalso(colaboradores_ok=True))
+    assert resultado.status == "REVISAO"
+    assert resultado.hora_confirmada == "11:05", resultado.hora_confirmada
+    print("OK: hora válida sobrevive a um REVISAO causado por outro campo")
 
 
 def teste_data_impossivel():
@@ -162,12 +195,23 @@ def teste_data_sem_ano():
     print("OK: data sem ano -> REVISAO (nunca inventa o ano)")
 
 
-def teste_hora_impossivel():
+def teste_hora_impossivel_nao_impede_confirmacao():
+    """
+    REQUISITO FUNCIONAL DEFINITIVO: a ILEGIBILIDADE da hora também não
+    impede o CONFIRMADO. A hora ilegível não vai para a planilha (seria
+    indistinguível de uma hora real), mas o texto bruto é preservado na
+    Observação -- nunca some em silêncio.
+    """
+    colaborador = {"matricula": "28972", "nome": "X", "cargo": "Y", "setor": "Z"}
     r = _reg({"matricula": CampoOcr("28972", 0.95, None), "data": CampoOcr("23/04/2026", 0.9, None),
               "hora": CampoOcr("25:99", 0.9, None)}, com_tempo_valido=False)
-    status, obs = classificar_registro(r, None, _DMFalso())
-    assert status == "REVISAO"
-    print("OK: hora impossível (25:99) -> REVISAO")
+    resultado = classificar_registro(r, colaborador, _DMFalso())
+    assert resultado.status == "CONFIRMADO", resultado.observacao
+    # Não usa o valor impossível...
+    assert resultado.hora_confirmada is None
+    # ...mas registra o texto bruto na Observação, para auditoria.
+    assert "25:99" in resultado.observacao, resultado.observacao
+    print("OK: hora impossível (25:99) NÃO impede CONFIRMADO; texto bruto vai para a Observação")
 
 
 def teste_data_hora_formato_inesperado():

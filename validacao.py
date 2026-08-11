@@ -6,10 +6,22 @@ usando as bases carregadas pelo DataManager. Não inventa dados: quando não
 há como validar algo (base vazia, campo ausente), não penaliza — apenas não
 confirma.
 
-Data e hora são tratadas como dados estruturados (ver tempo_parser.py):
-uma data/hora que não possa ser interpretada com segurança (ilegível,
-impossível, formato inesperado, campo vazio, ano ausente) manda o registro
-para REVISAO — nunca corrige ou inventa um valor "provável".
+Data e hora são tratadas como dados estruturados (ver tempo_parser.py) e
+têm pesos DIFERENTES (requisito funcional definitivo):
+
+    - DATA é OBRIGATÓRIA: uma data que não possa ser interpretada com
+      segurança (ilegível, impossível, formato inesperado, campo vazio,
+      ano ausente) manda o registro para REVISAO.
+    - HORA é OPCIONAL: ausente ou ilegível, ela NUNCA impede o
+      CONFIRMADO. Se data, matrícula, motivo e responsável estiverem
+      confirmados, o registro é CONFIRMADO mesmo sem hora nenhuma.
+
+Nenhum dos dois é corrigido ou "chutado" para um valor provável. Quando a
+hora existe e é válida, é preservada em `.hora_confirmada`; quando está
+ausente ou ilegível, `.hora_confirmada` é None e quem monta a exportação
+deixa o campo VAZIO — nunca escreve o texto ilegível do OCR na planilha
+(seria indistinguível de uma hora real). Nesse caso um aviso com o texto
+bruto vai para a Observação, para auditoria: nada some em silêncio.
 
 MOTIVO e RESPONSÁVEL (Fase 1 de precisão da extração — PROBLEMAS 3/4): a
 comparação contra as bases não é mais só exata. Primeiro tenta bater
@@ -36,7 +48,7 @@ from typing import Optional
 
 from correspondencia_aproximada import buscar_correspondencia, resolver_responsavel
 from registro_parser import Registro
-from tempo_parser import validar_data_hora
+from tempo_parser import avaliar_hora_opcional, interpretar_hora, validar_data
 
 CONFIANCA_MINIMA_MATRICULA = 0.80
 
@@ -60,12 +72,19 @@ class ResultadoValidacao(tuple):
     motivo/responsável, `.motivo_confirmado`/`.gestor_confirmado` com o
     valor normalizado (nunca sobrescreve o texto original do OCR — quem
     monta a exportação decide se usa a correção ou o texto bruto).
+
+    `.hora_confirmada` segue a mesma ideia para a HORA (campo opcional): é
+    o texto da hora quando ela pôde ser interpretada com segurança, e None
+    quando está ausente ou ilegível — nesse caso quem exporta deixa a
+    célula VAZIA em vez de escrever o texto ilegível do OCR.
     """
 
-    def __new__(cls, status, observacao, motivo_confirmado=None, gestor_confirmado=None):
+    def __new__(cls, status, observacao, motivo_confirmado=None, gestor_confirmado=None,
+                hora_confirmada=None):
         obj = super().__new__(cls, (status, observacao))
         obj.motivo_confirmado = motivo_confirmado
         obj.gestor_confirmado = gestor_confirmado
+        obj.hora_confirmada = hora_confirmada
         return obj
 
     @property
@@ -119,28 +138,42 @@ def classificar_registro(
     data_manager,
 ) -> ResultadoValidacao:
     """Devolve um ResultadoValidacao; status in {"CONFIRMADO","REVISAO"}."""
-    if not registro.completo:
-        return ResultadoValidacao("REVISAO", "matrícula não identificada pelo OCR")
-
-    campo_data = registro.campos.get("data")
+    # HORA é opcional e NUNCA bloqueia: é avaliada primeiro, uma única vez,
+    # e o resultado acompanha TODOS os retornos abaixo -- inclusive os de
+    # REVISAO por outro motivo. Assim uma hora legítima nunca é perdida só
+    # porque o registro precisou ir para revisão por causa de outro campo.
     campo_hora_reg = registro.campos.get("hora")
-    erro_tempo = validar_data_hora(
-        campo_data.texto if campo_data else "",
-        campo_hora_reg.texto if campo_hora_reg else "",
-    )
-    if erro_tempo:
-        return ResultadoValidacao("REVISAO", erro_tempo)
+    texto_hora = campo_hora_reg.texto if campo_hora_reg else ""
+    hora_confirmada = texto_hora if interpretar_hora(texto_hora) is not None else None
+    aviso_hora = avaliar_hora_opcional(texto_hora)
+
+    if not registro.completo:
+        return ResultadoValidacao(
+            "REVISAO", "matrícula não identificada pelo OCR", hora_confirmada=hora_confirmada
+        )
+
+    # DATA é obrigatória: esta continua sendo uma checagem bloqueante.
+    campo_data = registro.campos.get("data")
+    erro_data = validar_data(campo_data.texto if campo_data else "")
+    if erro_data:
+        return ResultadoValidacao("REVISAO", erro_data, hora_confirmada=hora_confirmada)
 
     campo_matricula = registro.campos["matricula"]
 
     if colaborador is None:
         if data_manager.colaboradores_disponivel:
-            return ResultadoValidacao("REVISAO", "matrícula não encontrada na base de colaboradores")
-        return ResultadoValidacao("REVISAO", "base de colaboradores indisponível")
+            return ResultadoValidacao(
+                "REVISAO", "matrícula não encontrada na base de colaboradores",
+                hora_confirmada=hora_confirmada,
+            )
+        return ResultadoValidacao(
+            "REVISAO", "base de colaboradores indisponível", hora_confirmada=hora_confirmada
+        )
 
     if campo_matricula.confianca is not None and campo_matricula.confianca < CONFIANCA_MINIMA_MATRICULA:
         return ResultadoValidacao(
-            "REVISAO", f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
+            "REVISAO", f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)",
+            hora_confirmada=hora_confirmada,
         )
 
     # Gestor e motivo são resolvidos de forma INDEPENDENTE um do outro (cada
@@ -148,7 +181,10 @@ def classificar_registro(
     # dois interrompe a checagem do outro: mesmo quando um falha, o outro
     # continua sendo avaliado, para que uma correção aceita num campo não
     # fique perdida só porque o outro campo precisou ir para revisão.
-    avisos = []
+    # O aviso de hora ilegível entra como AVISO (nunca como erro): ele
+    # documenta na Observação por que a célula Hora saiu em branco, sem
+    # jamais derrubar o registro para REVISAO.
+    avisos = [aviso_hora] if aviso_hora else []
     erros = []
 
     gestor_confirmado = None
@@ -183,9 +219,11 @@ def classificar_registro(
 
     if erros:
         return ResultadoValidacao(
-            "REVISAO", "; ".join(erros), motivo_confirmado=motivo_confirmado, gestor_confirmado=gestor_confirmado
+            "REVISAO", "; ".join(erros), motivo_confirmado=motivo_confirmado,
+            gestor_confirmado=gestor_confirmado, hora_confirmada=hora_confirmada,
         )
 
     return ResultadoValidacao(
-        "CONFIRMADO", "; ".join(avisos), motivo_confirmado=motivo_confirmado, gestor_confirmado=gestor_confirmado
+        "CONFIRMADO", "; ".join(avisos), motivo_confirmado=motivo_confirmado,
+        gestor_confirmado=gestor_confirmado, hora_confirmada=hora_confirmada,
     )

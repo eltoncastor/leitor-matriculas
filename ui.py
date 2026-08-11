@@ -413,7 +413,12 @@ class App(tk.Tk):
             cargo = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
             setor = colaborador["setor"] if colaborador else NAO_ENCONTRADO
             data_ = _texto_campo(registro, "data")
-            hora = _texto_campo(registro, "hora")
+            # HORA é campo OPCIONAL: só vai para a tabela/planilha quando
+            # pôde ser interpretada com segurança. Ausente ou ilegível, sai
+            # VAZIA -- nunca com o texto ilegível do OCR, que seria
+            # indistinguível de uma hora real. O texto bruto não some: fica
+            # registrado na Observação (ver validacao.avaliar_hora_opcional).
+            hora = resultado_classificacao.hora_confirmada or ""
             # PROBLEMAS 3/4: quando a correspondência aproximada aceitou uma
             # correção (ver validacao.py/correspondencia_aproximada.py), usa
             # o valor normalizado na tabela/planilha; o texto bruto do OCR
