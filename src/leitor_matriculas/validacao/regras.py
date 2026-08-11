@@ -23,6 +23,13 @@ deixa o campo VAZIO — nunca escreve o texto ilegível do OCR na planilha
 (seria indistinguível de uma hora real). Nesse caso um aviso com o texto
 bruto vai para a Observação, para auditoria: nada some em silêncio.
 
+DATA e HORA saem sempre em FORMATO CANÔNICO (`dd/mm/aa` e `HH:MM`, via
+`normalizar_data`/`normalizar_hora`), nunca com o separador que o OCR
+leu — a planilha não pode misturar "14.04.26", "14-04-26" e "28/04/26",
+nem "18.59" e "07:53". Normalizar o formato não afrouxa a validação: uma
+hora impossível ("90:24") continua ilegível e a célula sai vazia; uma
+data que não possa ser interpretada continua bloqueando (-> REVISAO).
+
 MOTIVO e RESPONSÁVEL (Fase 1 de precisão da extração — PROBLEMAS 3/4): a
 comparação contra as bases não é mais só exata. Primeiro tenta bater
 exatamente (como antes); se não bater, tenta uma correspondência
@@ -32,6 +39,15 @@ limiar e não há ambiguidade entre os dois melhores candidatos. Ambíguo ou
 abaixo do limiar continua indo para REVISAO, exatamente como uma
 divergência exata continuaria indo hoje. Nunca inventa um valor fora da
 base.
+
+MOTIVO: usa `resolver_motivo` (correspondencia_aproximada.py), que além
+da correspondência aproximada canonicaliza a família de sinônimos
+"negado" da base ("NEGADO"/"NEGADA"/"H. NEGADO"/"Horário negado") para
+`HORÁRIO NEGADO` quando a leitura veio corrompida do OCR — é justamente
+por serem sinônimos quase idênticos entre si que essas entradas geravam
+AMBIGUA e mandavam para REVISAO um registro cuja evidência era clara. Um
+match EXATO nunca é canonicalizado, e a normalização fica registrada na
+Observação.
 
 RESPONSÁVEL: usa `resolver_responsavel` (correspondencia_aproximada.py),
 que também lida com o caso opcional em que um Auxiliar de Prevenção de
@@ -49,12 +65,12 @@ from typing import Optional
 from leitor_matriculas.parsing.registro_parser import Registro
 from leitor_matriculas.parsing.tempo_parser import (
     avaliar_hora_opcional,
-    interpretar_hora,
     normalizar_data,
+    normalizar_hora,
     validar_data,
 )
 from leitor_matriculas.validacao.correspondencia_aproximada import (
-    buscar_correspondencia,
+    resolver_motivo,
     resolver_responsavel,
 )
 
@@ -112,40 +128,46 @@ class ResultadoValidacao(tuple):
         return self[1]
 
 
-def _resolver_campo_com_correspondencia(campo, candidatos, nome_campo_legivel):
+def _resolver_motivo_do_registro(campo, candidatos):
     """
-    Aplica a correspondência aproximada a um campo (motivo OU gestor)
-    contra os candidatos de uma base. Devolve (valor_confirmado, aviso,
-    erro):
+    Resolve o MOTIVO contra a base (ver
+    `correspondencia_aproximada.resolver_motivo`). Devolve
+    (valor_confirmado, aviso, erro):
         - erro: mensagem de REVISAO (SEM_CORRESPONDENCIA/AMBIGUA), ou None
-          se pôde confirmar (exato ou aproximado).
-        - valor_confirmado: o texto normalizado a usar (só quando erro é None).
+          se pôde confirmar (exato, aproximado ou normalizado).
+        - valor_confirmado: o texto a usar (só quando erro é None).
         - aviso: nota para a Observação quando houve correção por
-          aproximação (nunca preenchido em correspondência exata).
+          aproximação ou normalização da família "negado" (nunca
+          preenchido em correspondência exata).
     """
-    resultado = buscar_correspondencia(campo.texto, candidatos)
+    resultado = resolver_motivo(campo.texto, candidatos)
 
-    if resultado.status in ("EXATA", "APROXIMADA"):
-        aviso = None
-        if resultado.houve_normalizacao:
-            aviso = (
-                f"{nome_campo_legivel} reconhecido por aproximação: "
-                f"'{resultado.valor_sugerido}' (OCR: '{resultado.texto_original}', "
-                f"similaridade {resultado.similaridade:.2f})"
-            )
-        return resultado.valor_sugerido, aviso, None
+    if resultado.status == "EXATA":
+        return resultado.motivo_confirmado, None, None
+
+    if resultado.status == "NORMALIZADA":
+        return resultado.motivo_confirmado, (
+            f"motivo normalizado para {resultado.motivo_confirmado} a partir do OCR: "
+            f"'{resultado.texto_original}'"
+        ), None
+
+    if resultado.status == "APROXIMADA":
+        return resultado.motivo_confirmado, (
+            f"motivo reconhecido por aproximação: '{resultado.motivo_confirmado}' "
+            f"(OCR: '{resultado.texto_original}', similaridade {resultado.similaridade:.2f})"
+        ), None
 
     if resultado.status == "AMBIGUA":
         return None, None, (
-            f"{nome_campo_legivel} '{campo.texto}' ambíguo entre candidatos "
-            f"parecidos na base ('{resultado.valor_sugerido or ''}'"
-            f"{' e ' + resultado.segundo_candidato if resultado.segundo_candidato else ''}) "
+            f"motivo '{campo.texto}' ambíguo entre candidatos "
+            f"parecidos na base"
+            f"{' (' + resultado.segundo_candidato + ')' if resultado.segundo_candidato else ''} "
             f"-- não é possível confirmar com segurança"
         )
 
     # SEM_CORRESPONDENCIA (VAZIO/SEM_CANDIDATOS não chegam aqui — quem
     # chama só invoca isto quando o campo existe e a base está disponível)
-    return None, None, f"{nome_campo_legivel} '{campo.texto}' não reconhecido na base"
+    return None, None, f"motivo '{campo.texto}' não reconhecido na base"
 
 
 def classificar_registro(
@@ -169,9 +191,11 @@ def classificar_registro(
     # e o resultado acompanha TODOS os retornos abaixo -- inclusive os de
     # REVISAO por outro motivo. Assim uma hora legítima nunca é perdida só
     # porque o registro precisou ir para revisão por causa de outro campo.
+    # `normalizar_hora` devolve a hora já em HH:MM (ou None quando ilegível):
+    # a planilha nunca repete o separador que o OCR leu ("18.59" -> "18:59").
     campo_hora_reg = registro.campos.get("hora")
     texto_hora = campo_hora_reg.texto if campo_hora_reg else ""
-    hora_confirmada = texto_hora if interpretar_hora(texto_hora) is not None else None
+    hora_confirmada = normalizar_hora(texto_hora)
     aviso_hora = avaliar_hora_opcional(texto_hora)
 
     # DATA canônica (dd/mm/aa) -- calculada uma vez e devolvida em todos os
@@ -186,19 +210,78 @@ def classificar_registro(
     if resultado_matricula is not None and resultado_matricula.matricula:
         matricula_confirmada = resultado_matricula.matricula
 
+    # GESTOR e MOTIVO são resolvidos AQUI, antes de qualquer retorno
+    # bloqueante, pelo mesmo motivo da hora e da data: o resultado
+    # acompanha TODOS os retornos abaixo. Antes eles só eram resolvidos no
+    # fim da função, então um registro barrado mais cedo (data ilegível,
+    # matrícula fora da base...) chegava à planilha com o texto CRU do OCR
+    # nessas colunas -- exatamente o "Hiv. Nigado"/"Negade" que não pode
+    # aparecer na saída final. Resolver antes não afrouxa nada: os erros
+    # que estes dois campos produzem continuam sendo aplicados no fim, e
+    # nenhuma checagem bloqueante mudou de lugar.
+    #
+    # Cada um é resolvido de forma INDEPENDENTE do outro (cada um só
+    # contra a sua própria base -- ver PROBLEMAS 3/4): mesmo quando um
+    # falha, o outro continua sendo avaliado, para que uma correção aceita
+    # num campo não fique perdida só porque o outro precisou ir para
+    # revisão.
+    erros_campos = []
+    avisos_campos = []
+
+    gestor_confirmado = None
+    campo_gestor = registro.campos.get("gestor")
+    if campo_gestor and data_manager.gestores_disponivel:
+        resultado_responsavel = resolver_responsavel(campo_gestor.texto, data_manager.listar_gestores())
+        if resultado_responsavel.status in ("EXATA", "APROXIMADA"):
+            gestor_confirmado = resultado_responsavel.gestor_confirmado
+            if resultado_responsavel.houve_normalizacao:
+                avisos_campos.append(
+                    f"responsável reconhecido por aproximação: '{gestor_confirmado}' "
+                    f"(OCR: '{campo_gestor.texto}')"
+                )
+        elif resultado_responsavel.status == "AMBIGUA":
+            erros_campos.append(
+                f"responsável '{campo_gestor.texto}' ambíguo entre candidatos parecidos na base "
+                f"-- não é possível confirmar com segurança"
+            )
+        else:
+            erros_campos.append(f"responsável '{campo_gestor.texto}' não reconhecido na base")
+
+    motivo_confirmado = None
+    campo_motivo = registro.campos.get("motivo")
+    if campo_motivo and data_manager.motivos_disponivel:
+        motivo_confirmado, aviso_motivo, erro_motivo = _resolver_motivo_do_registro(
+            campo_motivo, data_manager.listar_motivos()
+        )
+        if erro_motivo:
+            erros_campos.append(erro_motivo)
+        elif aviso_motivo:
+            avisos_campos.append(aviso_motivo)
+
     def _resultado(status, observacao, **extras):
         extras.setdefault("hora_confirmada", hora_confirmada)
         extras.setdefault("data_confirmada", data_confirmada)
         extras.setdefault("matricula_confirmada", matricula_confirmada)
+        extras.setdefault("motivo_confirmado", motivo_confirmado)
+        extras.setdefault("gestor_confirmado", gestor_confirmado)
         return ResultadoValidacao(status, observacao, **extras)
 
+    def _bloqueio(motivo_do_bloqueio):
+        """REVISAO por uma checagem bloqueante. A razão do bloqueio vem
+        primeiro (é o que o operador precisa ler), mas os avisos de
+        normalização de motivo/responsável vão junto: eles carregam o
+        texto CRU do OCR, que sai das colunas normalizadas e não pode
+        sumir da auditoria."""
+        partes = [motivo_do_bloqueio] + avisos_campos
+        return _resultado("REVISAO", "; ".join(partes))
+
     if not registro.completo:
-        return _resultado("REVISAO", "matrícula não identificada pelo OCR")
+        return _bloqueio("matrícula não identificada pelo OCR")
 
     # DATA é obrigatória: esta continua sendo uma checagem bloqueante.
     erro_data = validar_data(texto_data)
     if erro_data:
-        return _resultado("REVISAO", erro_data)
+        return _bloqueio(erro_data)
 
     campo_matricula = registro.campos["matricula"]
 
@@ -207,34 +290,29 @@ def classificar_registro(
     # uma seria exatamente o "CONFIRMADO incorreto" que o sistema evita.
     if resultado_matricula is not None and resultado_matricula.status == "AMBIGUA":
         candidatos = ", ".join(resultado_matricula.candidatos or [])
-        return _resultado(
-            "REVISAO",
+        return _bloqueio(
             f"matrícula '{resultado_matricula.texto_original}' ambígua -- "
-            f"mais de uma leitura existe na base ({candidatos})",
+            f"mais de uma leitura existe na base ({candidatos})"
         )
 
     if resultado_matricula is not None and resultado_matricula.status == "IRRECUPERAVEL":
-        return _resultado(
-            "REVISAO",
+        return _bloqueio(
             f"matrícula '{resultado_matricula.texto_original}' não pôde ser "
-            f"convertida com segurança para dígitos",
+            f"convertida com segurança para dígitos"
         )
 
     if colaborador is None:
         if data_manager.colaboradores_disponivel:
-            return _resultado("REVISAO", "matrícula não encontrada na base de colaboradores")
-        return _resultado("REVISAO", "base de colaboradores indisponível")
+            return _bloqueio("matrícula não encontrada na base de colaboradores")
+        return _bloqueio("base de colaboradores indisponível")
 
     if campo_matricula.confianca is not None and campo_matricula.confianca < CONFIANCA_MINIMA_MATRICULA:
-        return _resultado(
-            "REVISAO", f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
+        return _bloqueio(
+            f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
         )
 
-    # Gestor e motivo são resolvidos de forma INDEPENDENTE um do outro (cada
-    # um só contra a sua própria base -- ver PROBLEMAS 3/4) e nenhum dos
-    # dois interrompe a checagem do outro: mesmo quando um falha, o outro
-    # continua sendo avaliado, para que uma correção aceita num campo não
-    # fique perdida só porque o outro campo precisou ir para revisão.
+    # Passadas as checagens bloqueantes, só resta aplicar o que gestor e
+    # motivo (já resolvidos lá em cima) apuraram.
     # O aviso de hora ilegível entra como AVISO (nunca como erro): ele
     # documenta na Observação por que a célula Hora saiu em branco, sem
     # jamais derrubar o registro para REVISAO.
@@ -247,45 +325,9 @@ def classificar_registro(
             f"matrícula recuperada: '{resultado_matricula.texto_original}' -> "
             f"'{resultado_matricula.matricula}' (confirmada na base de colaboradores)"
         )
-    erros = []
+    avisos.extend(avisos_campos)
 
-    gestor_confirmado = None
-    campo_gestor = registro.campos.get("gestor")
-    if campo_gestor and data_manager.gestores_disponivel:
-        resultado_responsavel = resolver_responsavel(campo_gestor.texto, data_manager.listar_gestores())
-        if resultado_responsavel.status in ("EXATA", "APROXIMADA"):
-            gestor_confirmado = resultado_responsavel.gestor_confirmado
-            if resultado_responsavel.houve_normalizacao:
-                avisos.append(
-                    f"responsável reconhecido por aproximação: '{gestor_confirmado}' "
-                    f"(OCR: '{campo_gestor.texto}')"
-                )
-        elif resultado_responsavel.status == "AMBIGUA":
-            erros.append(
-                f"responsável '{campo_gestor.texto}' ambíguo entre candidatos parecidos na base "
-                f"-- não é possível confirmar com segurança"
-            )
-        else:
-            erros.append(f"responsável '{campo_gestor.texto}' não reconhecido na base")
+    if erros_campos:
+        return _resultado("REVISAO", "; ".join(erros_campos))
 
-    motivo_confirmado = None
-    campo_motivo = registro.campos.get("motivo")
-    if campo_motivo and data_manager.motivos_disponivel:
-        motivo_confirmado, aviso, erro = _resolver_campo_com_correspondencia(
-            campo_motivo, data_manager.listar_motivos(), "motivo"
-        )
-        if erro:
-            erros.append(erro)
-        elif aviso:
-            avisos.append(aviso)
-
-    if erros:
-        return _resultado(
-            "REVISAO", "; ".join(erros), motivo_confirmado=motivo_confirmado,
-            gestor_confirmado=gestor_confirmado,
-        )
-
-    return _resultado(
-        "CONFIRMADO", "; ".join(avisos), motivo_confirmado=motivo_confirmado,
-        gestor_confirmado=gestor_confirmado,
-    )
+    return _resultado("CONFIRMADO", "; ".join(avisos))

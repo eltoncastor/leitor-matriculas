@@ -535,8 +535,13 @@ class App(tk.Tk):
                     if self._data_manager.colaboradores_disponivel else None
                 ),
             )
-            if resultado_matricula.matricula:
-                matricula_normalizada = resultado_matricula.matricula
+            # A matrícula exibida/exportada é SEMPRE só dígitos (requisito
+            # funcional): quando a recuperação não conseguiu chegar a uma
+            # leitura só-dígitos, a célula sai VAZIA em vez de levar o
+            # texto cru do OCR ("1954+", "195.4"). Nada se perde -- o texto
+            # original continua na coluna técnica de OCR, na Observação e
+            # no aviso "Linhas sem matrícula" logo abaixo.
+            matricula_normalizada = resultado_matricula.matricula or ""
 
             colaborador = None
             if registro.completo and resultado_matricula.status != "AMBIGUA":
@@ -555,11 +560,14 @@ class App(tk.Tk):
             nome = colaborador["nome"] if colaborador else NAO_ENCONTRADO
             cargo = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
             setor = colaborador["setor"] if colaborador else NAO_ENCONTRADO
-            # DATA sai sempre no formato canônico dd/mm/aa quando pôde ser
-            # interpretada com segurança; quando não pôde, o registro já
-            # está em REVISAO e o texto cru do OCR é mantido de propósito,
-            # para o operador ver exatamente o que foi lido.
-            data_ = resultado_classificacao.data_confirmada or _texto_campo(registro, "data")
+            # DATA sai sempre no formato canônico dd/mm/aa; quando não pôde
+            # ser interpretada com segurança, a célula sai VAZIA (o registro
+            # já está em REVISAO). Mesma regra da Hora, e pelo mesmo motivo:
+            # escrever "23.04" ou "14.0.4.26" na coluna Data misturaria
+            # formatos na planilha e o valor seria indistinguível de uma
+            # data de verdade. O texto cru do OCR não se perde -- fica na
+            # Observação (ver validacao.validar_data) e na coluna técnica.
+            data_ = resultado_classificacao.data_confirmada or ""
             # HORA é campo OPCIONAL: só vai para a tabela/planilha quando
             # pôde ser interpretada com segurança. Ausente ou ilegível, sai
             # VAZIA -- nunca com o texto ilegível do OCR, que seria
@@ -601,13 +609,13 @@ class App(tk.Tk):
 
             self.tabela.insert("", "end", values=(
                 numero_pagina, rotulo_status, data_, hora,
-                matricula_normalizada or texto_matricula, nome, setor, motivo, gestor,
+                matricula_normalizada, nome, setor, motivo, gestor,
                 cargo, conf_str,
             ))
 
             self._registros_exportacao.append({
                 "data": data_, "hora": hora,
-                "matricula": matricula_normalizada or texto_matricula,
+                "matricula": matricula_normalizada,
                 "nome": nome, "cargo": cargo, "setor": setor,
                 "gestor": gestor, "motivo": motivo,
                 "pagina_origem": numero_pagina, "status": status,
@@ -841,7 +849,17 @@ class App(tk.Tk):
             matricula_digitada = campos_edicao["matricula"].get().strip()
             gestor_digitado = campos_edicao["gestor"].get().strip()
             motivo_digitado = campos_edicao["motivo"].get().strip()
+            # Mesmo tratamento do fluxo automático: a matrícula final só
+            # pode conter dígitos, mesmo vinda de digitação manual.
             matricula_normalizada = normalizar_matricula(matricula_digitada) if matricula_digitada else ""
+            resultado_matricula = resolver_matricula(
+                matricula_normalizada,
+                existe_na_base=(
+                    (lambda m: self._data_manager.buscar_colaborador(m) is not None)
+                    if self._data_manager.colaboradores_disponivel else None
+                ),
+            )
+            matricula_normalizada = resultado_matricula.matricula or ""
 
             campos_sinteticos = {}
             if registro.get("data"):
@@ -864,9 +882,12 @@ class App(tk.Tk):
                 self._data_manager.buscar_colaborador(matricula_normalizada) if matricula_normalizada else None
             )
 
-            resultado = classificar_registro(registro_sintetico, colaborador, self._data_manager)
+            resultado = classificar_registro(
+                registro_sintetico, colaborador, self._data_manager,
+                resultado_matricula=resultado_matricula,
+            )
 
-            registro["matricula"] = matricula_normalizada or matricula_digitada
+            registro["matricula"] = matricula_normalizada
             registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
             registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
             registro["setor"] = colaborador["setor"] if colaborador else NAO_ENCONTRADO

@@ -31,6 +31,15 @@ Formatos aceitos:
     HORA: hh:mm, hh.mm, hh"h"mm (ex. "11h05"), com segundos opcionais
           (hh:mm:ss).
 
+FORMATO CANÔNICO DE SAÍDA (requisito funcional definitivo): a planilha
+final nunca repete o separador que o OCR leu. `normalizar_data` devolve
+sempre `dd/mm/aa` e `normalizar_hora` sempre `HH:MM` — assim "14.04.26",
+"14-04-26" e "14.04:26" saem todos como "14/04/26", e "18.59", "11h27" e
+"07:53" saem todos como "18:59"/"11:27"/"07:53". Normalizar o FORMATO não
+afrouxa a validação: as duas funções são a interpretação estrita de
+sempre seguida da formatação, então uma hora impossível ("90:24") ou uma
+data sem ano ("23/04") continuam recusadas.
+
 Este módulo não sabe nada sobre OCR, registros ou a folha — só interpreta
 texto já extraído.
 
@@ -141,6 +150,30 @@ def interpretar_hora(texto: Optional[str]) -> Optional[time]:
         return None  # hora impossível
 
     return time(hora, minuto, segundo)
+
+
+def formatar_hora_hh_mm(hora: time) -> str:
+    """Formato canônico de saída da HORA na planilha: `HH:MM`."""
+    return f"{hora.hour:02d}:{hora.minute:02d}"
+
+
+def normalizar_hora(texto: Optional[str]) -> Optional[str]:
+    """
+    Devolve a HORA já no formato canônico `HH:MM`, ou None quando o texto
+    não puder ser interpretado com segurança.
+
+    Mesmo papel de `normalizar_data` para a DATA, e com a mesma ressalva:
+    isto NÃO afrouxa nada. É `interpretar_hora` (mesma validação estrita de
+    intervalo -- "90:24" continua sendo recusado) seguida da formatação
+    canônica. Serve para que a planilha final não misture "18.59", "07.55",
+    "11h27" e "07:53" -- todos saem como `HH:MM`.
+
+    Os segundos, quando o OCR os lê, são descartados de propósito: o
+    formato mandatório da coluna é `HH:MM`, e o segundo não é informação
+    que a folha registre.
+    """
+    hora = interpretar_hora(texto)
+    return formatar_hora_hh_mm(hora) if hora is not None else None
 
 
 def interpretar_data_hora(texto_data: Optional[str], texto_hora: Optional[str]) -> Optional[datetime]:

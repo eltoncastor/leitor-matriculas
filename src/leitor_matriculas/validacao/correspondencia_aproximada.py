@@ -105,6 +105,11 @@ def buscar_correspondencia(
 
     alvo = _normalizar(texto_ocr)
 
+    # As planilhas reais trazem os valores com espaços de preenchimento
+    # (" Horário negado         "). Isso é artefato da célula, não parte do
+    # valor: sai daqui já aparado, senão iria assim para a planilha final.
+    candidatos = [str(c).strip() for c in candidatos]
+
     pontuacoes = []
     for candidato in candidatos:
         similaridade = difflib.SequenceMatcher(None, alvo, _normalizar(candidato)).ratio()
@@ -132,6 +137,138 @@ def buscar_correspondencia(
 
     return ResultadoCorrespondencia(
         texto_ocr, melhor_candidato, "APROXIMADA", melhor_sim, segundo_candidato, segunda_sim
+    )
+
+
+# ---------------------------------------------------------------------------
+# MOTIVO
+#
+# "Horário negado" é, de longe, o motivo mais frequente da folha e o mais
+# maltratado pelo OCR: manuscrito e abreviado de N formas ("H. negado",
+# "Hr. negado", "negado"), ele sai como "Hiv. Nigado", "Negoide",
+# "Negade", "NEGAND", "I Wegado", "NoGAAO"... A base reflete isso: além de
+# "Horário negado", ela tem "NEGADO", "NEGADA" e "H. NEGADO" cadastrados
+# separadamente. Essas entradas são SINÔNIMOS do mesmo motivo real, e é
+# justamente por serem quase idênticas entre si que o OCR corrompido cai
+# em AMBIGUA na `buscar_correspondencia` -- o registro ia para REVISAO não
+# por falta de evidência, mas por excesso de candidatos equivalentes.
+#
+# `resolver_motivo` trata essa família como uma coisa só:
+#   - a família é derivada DA BASE (entradas cujo texto contém "NEGAD"),
+#     nunca de uma lista fixa aqui -- se a base mudar, isto acompanha;
+#   - o fallback só existe se a base tiver mesmo a entrada canônica
+#     "Horário negado" (senão, seria inventar um valor fora da base);
+#   - um match EXATO nunca é mexido: se o operador escreveu "NEGADA" e o
+#     OCR leu "NEGADA", é isso que vai para a planilha;
+#   - um match APROXIMADO que cai na família, e um caso AMBIGUO/sem
+#     correspondência com evidência SUFICIENTE de família, viram o valor
+#     canônico `HORÁRIO NEGADO`;
+#   - a evidência exigida é dupla: passar do limiar contra a família E
+#     ganhar dos motivos de FORA da família por uma margem clara. Sem
+#     isso, um "ADM"/"ARM" corrompido poderia ser sugado para cá -- é essa
+#     segunda checagem que impede o falso positivo.
+# ---------------------------------------------------------------------------
+
+MOTIVO_HORARIO_NEGADO = "HORÁRIO NEGADO"
+
+# Marca textual da família na base. Deliberadamente o radical, não a
+# palavra inteira: cobre "NEGADO"/"NEGADA"/"H. NEGADO"/"Horário negado".
+_MARCA_FAMILIA_NEGADO = "NEGAD"
+
+
+@dataclass
+class ResultadoMotivo:
+    """
+    Resultado de resolver o campo MOTIVO.
+
+    status: os mesmos de ResultadoCorrespondencia, mais
+        "NORMALIZADA" -- o texto do OCR não bateu de forma confiável com
+        nenhum motivo isolado, mas tinha evidência suficiente de ser a
+        família "negado", e foi normalizado para MOTIVO_HORARIO_NEGADO.
+    """
+    texto_original: str
+    motivo_confirmado: Optional[str]
+    status: str
+    similaridade: Optional[float] = None
+    segundo_candidato: Optional[str] = None
+    houve_fallback: bool = False
+
+
+def _e_da_familia_negado(texto: Optional[str]) -> bool:
+    return _MARCA_FAMILIA_NEGADO in _normalizar(texto)
+
+
+def _melhor_similaridade(alvo_normalizado: str, candidatos: List[str]) -> float:
+    if not candidatos:
+        return 0.0
+    return max(
+        difflib.SequenceMatcher(None, alvo_normalizado, _normalizar(c)).ratio()
+        for c in candidatos
+    )
+
+
+def resolver_motivo(
+    texto_ocr: Optional[str],
+    candidatos_motivos: List[str],
+    limiar_minimo: float = LIMIAR_MINIMO_PADRAO,
+    margem_ambiguidade: float = MARGEM_AMBIGUIDADE_PADRAO,
+) -> ResultadoMotivo:
+    """
+    Resolve o campo MOTIVO contra a base de motivos, com a canonicalização
+    da família "negado" descrita acima. Nunca inventa um motivo fora da
+    base; sem evidência suficiente, devolve o status de falha e o registro
+    segue para REVISAO como antes.
+    """
+    candidatos_motivos = [str(c).strip() for c in candidatos_motivos]
+    resultado = buscar_correspondencia(texto_ocr, candidatos_motivos, limiar_minimo, margem_ambiguidade)
+
+    if resultado.status in ("VAZIO", "SEM_CANDIDATOS"):
+        return ResultadoMotivo(texto_ocr or "", None, resultado.status, resultado.similaridade)
+
+    # Match exato: é exatamente o que está escrito na folha e na base.
+    # Não se mexe, nem para canonicalizar a família (requisito: motivo
+    # reconhecido com segurança mantém o motivo correto).
+    if resultado.status == "EXATA":
+        return ResultadoMotivo(
+            texto_ocr, resultado.valor_sugerido, "EXATA", resultado.similaridade,
+            resultado.segundo_candidato,
+        )
+
+    familia = [c for c in candidatos_motivos if _e_da_familia_negado(c)]
+    # Só canonicaliza se o próprio valor canônico existir na base -- caso
+    # contrário estaríamos escrevendo na planilha um motivo que a empresa
+    # não cadastrou.
+    canonico_na_base = any(
+        _normalizar(c) == _normalizar(MOTIVO_HORARIO_NEGADO) for c in candidatos_motivos
+    )
+
+    # Aproximado que caiu na família: o OCR estava corrompido e a correção
+    # aponta para um sinônimo. Sai canonicalizado, para a planilha não
+    # misturar "H. NEGADO"/"NEGADO"/"HORÁRIO NEGADO" vindos do mesmo erro.
+    if resultado.status == "APROXIMADA":
+        if canonico_na_base and _e_da_familia_negado(resultado.valor_sugerido):
+            return ResultadoMotivo(
+                texto_ocr, MOTIVO_HORARIO_NEGADO, "NORMALIZADA", resultado.similaridade,
+                resultado.segundo_candidato, houve_fallback=True,
+            )
+        return ResultadoMotivo(
+            texto_ocr, resultado.valor_sugerido, "APROXIMADA", resultado.similaridade,
+            resultado.segundo_candidato,
+        )
+
+    # AMBIGUA / SEM_CORRESPONDENCIA: última chance, só com evidência dupla.
+    if canonico_na_base and familia:
+        alvo = _normalizar(texto_ocr)
+        sim_familia = _melhor_similaridade(alvo, familia)
+        sim_fora = _melhor_similaridade(alvo, [c for c in candidatos_motivos if c not in familia])
+        if sim_familia >= limiar_minimo and (sim_familia - sim_fora) >= margem_ambiguidade:
+            return ResultadoMotivo(
+                texto_ocr, MOTIVO_HORARIO_NEGADO, "NORMALIZADA", sim_familia,
+                resultado.segundo_candidato, houve_fallback=True,
+            )
+
+    return ResultadoMotivo(
+        texto_ocr, None, resultado.status, resultado.similaridade, resultado.segundo_candidato,
     )
 
 
@@ -204,6 +341,18 @@ def _expandir_para_entrada_mais_especifica(gestor: str, candidatos: List[str]) -
     return None
 
 
+def _com_expansao(gestor: Optional[str], candidatos: List[str]) -> Optional[str]:
+    """`gestor` já expandido para a entrada mais específica, quando existe
+    exatamente uma. Aplicado a TODOS os caminhos de aceitação de
+    `resolver_responsavel` -- um código de gestor lido sozinho ("GR5", ou
+    "6R05" corrigido para "GR5") tem de sair na planilha como a
+    identificação completa cadastrada ("GR5 - DIEGO"), venha ele de um
+    match exato, aproximado ou de um prefixo."""
+    if not gestor:
+        return gestor
+    return _expandir_para_entrada_mais_especifica(gestor, candidatos) or gestor
+
+
 def resolver_responsavel(
     texto_ocr: Optional[str],
     candidatos_gestores: List[str],
@@ -221,6 +370,7 @@ def resolver_responsavel(
     reconhecido nem devolvido (o resultado final não usa o nome do
     auxiliar).
     """
+    candidatos_gestores = [str(c).strip() for c in candidatos_gestores]
     resultado_completo = buscar_correspondencia(texto_ocr, candidatos_gestores, limiar_minimo, margem_ambiguidade)
 
     if resultado_completo.status in ("VAZIO", "SEM_CANDIDATOS"):
@@ -230,12 +380,16 @@ def resolver_responsavel(
     # nada de mais específico pode existir, então nem tenta separar um
     # texto residual (ex.: "GR3 - DIANA" não deve virar gestor="GR3" nunca).
     if resultado_completo.status == "EXATA":
+        gestor_confirmado = _com_expansao(resultado_completo.valor_sugerido, candidatos_gestores)
         return ResultadoResponsavel(
             texto_original=texto_ocr,
-            gestor_confirmado=resultado_completo.valor_sugerido,
+            gestor_confirmado=gestor_confirmado,
             status="EXATA",
             similaridade=resultado_completo.similaridade,
-            houve_normalizacao=False,
+            # Expandir "GR5" -> "GR5 - DIEGO" É uma normalização do campo
+            # (o texto sai da planilha diferente do que o OCR leu), então
+            # a Observação precisa registrar isso.
+            houve_normalizacao=_normalizar(gestor_confirmado) != _normalizar(texto_ocr),
         )
 
     # Para qualquer outro resultado do texto inteiro (APROXIMADA, AMBIGUA
@@ -258,10 +412,7 @@ def resolver_responsavel(
             if resultado_prefixo.status not in ("EXATA", "APROXIMADA"):
                 continue
 
-            gestor_confirmado = resultado_prefixo.valor_sugerido
-            expansao = _expandir_para_entrada_mais_especifica(gestor_confirmado, candidatos_gestores)
-            if expansao:
-                gestor_confirmado = expansao
+            gestor_confirmado = _com_expansao(resultado_prefixo.valor_sugerido, candidatos_gestores)
 
             return ResultadoResponsavel(
                 texto_original=texto_ocr,
@@ -276,7 +427,7 @@ def resolver_responsavel(
     if resultado_completo.status == "APROXIMADA":
         return ResultadoResponsavel(
             texto_original=texto_ocr,
-            gestor_confirmado=resultado_completo.valor_sugerido,
+            gestor_confirmado=_com_expansao(resultado_completo.valor_sugerido, candidatos_gestores),
             status="APROXIMADA",
             similaridade=resultado_completo.similaridade,
             houve_normalizacao=True,
