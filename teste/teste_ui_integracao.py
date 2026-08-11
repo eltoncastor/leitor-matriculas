@@ -19,6 +19,35 @@ import pymupdf as fitz
 from leitor_matriculas.ui.app import App, _ler_imagem
 from leitor_matriculas.ocr.engine import OCRResult
 
+
+class _DMRevisaoDeterministica:
+    """
+    DataManager fake usado só a partir da etapa de revisão manual, Fase 7.
+
+    A revisão manual agora REAVALIA de verdade a correção digitada (ver
+    PROBLEMAS C/D em app.py) em vez de forçar CONFIRMADO -- então o
+    resultado da correção passa a depender do conteúdo de `dados/`. Como
+    `dados/` é local/gitignored (pode nem existir em outra máquina, ver
+    CLAUDE.md), o teste não pode depender do que essas planilhas reais
+    contêm para ser determinístico. Esta base fake substitui a real só
+    para o passo de revisão, e reconhece exatamente UMA matrícula.
+    """
+    colaboradores_disponivel = True
+    gestores_disponivel = False  # sem base -> gestor não bloqueia (mesma regra já existente)
+    motivos_disponivel = False
+    avisos = []
+
+    def buscar_colaborador(self, matricula):
+        if matricula == "28972":
+            return {"matricula": "28972", "nome": "Fulano Corrigido", "cargo": "Cargo X", "setor": "Setor X"}
+        return None
+
+    def listar_gestores(self):
+        return []
+
+    def listar_motivos(self):
+        return []
+
 # --- fixtures: imagem sintética de teste ---
 # Usa tempfile em vez de um caminho POSIX fixo ("/tmp/...") -- em Windows
 # isso não é garantido existir/ser gravável, diferente de tempfile, que
@@ -111,7 +140,13 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
     assert wb.sheetnames == ["Liberações","Revisão","Resumo"]
     print("Linhas Liberacoes:", wb["Liberações"].max_row)
 
-    # -------- revisao manual --------
+    # -------- revisao manual (Fase 7: reavaliação real, não force-confirm) --------
+    # A partir daqui a base real de dados/ deixa de importar -- ver
+    # _DMRevisaoDeterministica. Isso NÃO reclassifica os registros já
+    # processados (o status já foi decidido, com a base real, lá em
+    # cima); só passa a valer para o que `_confirmar` reavaliar agora.
+    app._data_manager = _DMRevisaoDeterministica()
+
     print("Botao revisao:", app.btn_revisao.cget('text'))
     app._abrir_revisao()
     # pega a janela Toplevel criada
@@ -122,22 +157,30 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
     itens = tabela_rev.get_children()
     print("Itens pendentes na revisao:", len(itens))
     assert len(itens) == app._contador_revisao
+    # PROBLEMA E: esta janela só pode conter linhas REVISAO -- nenhuma
+    # ERRO (página que falhou não tem campo nenhum de verdade a corrigir).
+    assert app._paginas_com_erro == 0  # este lote não teve página com erro
 
+    import tkinter as _tk
+    frame_edicao = [w for w in janela.winfo_children() if isinstance(w, _tk.ttk.LabelFrame)][0]
+    botao_confirmar = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Button)][0]
+
+    # -------- 1) correção REAL (matrícula corrigida para uma que a base
+    # (fake) reconhece) -- deve virar CONFIRMADO, e Nome/Setor/Cargo
+    # devem ser re-consultados (PROBLEMA C), não ficar em "(não encontrado)".
     revisao_antes = app._contador_revisao
     confirmados_antes = app._contador_confirmados
     tabela_rev.selection_set(itens[0])
     tabela_rev.event_generate("<<TreeviewSelect>>")
     app.update()
-
-    import tkinter as _tk
-    frame_edicao = [w for w in janela.winfo_children() if isinstance(w, _tk.ttk.LabelFrame)][0]
-    botao_confirmar = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Button)][0]
+    entries = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Entry)]
+    entries[0].delete(0, 'end'); entries[0].insert(0, "28972")  # matrícula reconhecida pela fake DM
     botao_confirmar.invoke()
     app.update()
 
     assert app._contador_revisao == revisao_antes - 1
     assert app._contador_confirmados == confirmados_antes + 1
-    print("OK: correcao manual moveu 1 registro de Revisao para Confirmado")
+    print("OK: correcao manual REAL moveu 1 registro de Revisao para Confirmado")
     print("Botao revisao apos correcao:", app.btn_revisao.cget("text"))
 
     linhas_apos_correcao = app.tabela.get_children()
@@ -145,8 +188,46 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
     assert any("CONFIRMADO" in s for s in status_corrigido)
     print("OK: tabela principal refletiu a correcao (sincronizacao)")
 
+    corrigidos = [r for r in app._registros_exportacao if r.get("nome") == "Fulano Corrigido"]
+    assert len(corrigidos) == 1, corrigidos
+    assert corrigidos[0]["status"] == "CONFIRMADO"
+    assert corrigidos[0]["setor"] == "Setor X" and corrigidos[0]["cargo"] == "Cargo X"
+    print("OK: PROBLEMA C -- Nome/Setor/Cargo re-consultados pela matricula corrigida (nao ficaram '(não encontrado)')")
+
+    # -------- 2) correção que NÃO resolve o problema real -- Fase 7
+    # (PROBLEMA D): não pode virar CONFIRMADO só por ter clicado o botão.
+    if len(itens) >= 2:
+        tabela_rev.selection_set(itens[1])
+        tabela_rev.event_generate("<<TreeviewSelect>>")
+        app.update()
+        entries2 = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Entry)]
+        entries2[0].delete(0, 'end'); entries2[0].insert(0, "00000")  # a fake DM não reconhece
+        revisao_antes_2 = app._contador_revisao
+        botao_confirmar.invoke()
+        app.update()
+        assert app._contador_revisao == revisao_antes_2, "registro nao corrigido de verdade nao pode virar CONFIRMADO"
+        assert itens[1] in tabela_rev.get_children(), "registro ainda pendente deve continuar na lista"
+        print("OK: PROBLEMA D -- correcao que nao resolve o problema real permanece em REVISAO")
+
     if janela.winfo_exists():
         janela.destroy()
+
+    # -------- PROBLEMA E: uma linha ERRO nunca pode aparecer na revisão --------
+    app._registros_exportacao.append({
+        "data": "", "hora": "", "matricula": "", "nome": "", "cargo": "", "setor": "",
+        "gestor": "", "motivo": "", "pagina_origem": 999, "status": "ERRO",
+        "confianca_matricula": "", "confianca_gestor": "", "confianca_motivo": "",
+        "observacao": "falha simulada de pagina", "texto_ocr_original": "",
+    })
+    app._abrir_revisao()
+    toplevels_e = [w for w in app.winfo_children() if isinstance(w, __import__('tkinter').Toplevel)]
+    if toplevels_e:
+        janela_e = toplevels_e[-1]
+        tabela_rev_e = [w for w in janela_e.winfo_children() if isinstance(w, __import__('tkinter').ttk.Treeview)][0]
+        valores_pagina = [tabela_rev_e.item(i, 'values')[0] for i in tabela_rev_e.get_children()]
+        assert 999 not in valores_pagina, "linha ERRO nao pode aparecer na janela de revisao"
+        janela_e.destroy()
+    print("OK: PROBLEMA E -- linha ERRO nunca aparece na janela de revisao manual")
 
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()

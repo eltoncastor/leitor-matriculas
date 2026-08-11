@@ -28,6 +28,7 @@ from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
 from leitor_matriculas.dados.data_manager import DataManager
 from leitor_matriculas.parsing.registro_parser import (
     CampoOcr,
+    Registro,
     parse_registros,
     verificar_contagem_posicoes,
 )
@@ -136,6 +137,13 @@ class App(tk.Tk):
         self._contador_revisao = 0
         self._paginas_processadas = 0
         self._paginas_com_erro = 0
+        # Fase 7 (operação em lote): total esperado de páginas do lote em
+        # andamento (quando conhecido) e quantas dessa leva específica já
+        # foram processadas -- usados só para mostrar progresso "X/Y" na
+        # barra de status durante lotes longos (~50 folhas reais). Nunca
+        # usados para nenhuma decisão de negócio, só informativos.
+        self._total_paginas_lote = None
+        self._paginas_processadas_lote = 0
 
         self._montar_layout()
 
@@ -208,17 +216,35 @@ class App(tk.Tk):
     def _on_selecionar_imagem(self):
         if self._processando:
             return
-        path = filedialog.askopenfilename(title="Selecione a foto da folha", filetypes=EXTENSOES_IMAGEM)
-        if not path:
+        # Fase 7 (operação em lote): seleção MÚLTIPLA -- selecionar um
+        # arquivo de cada vez para ~50 fotos reais é operacionalmente
+        # arriscado (esquecer um arquivo, clicar errado, cansaço do
+        # operador), e é justamente o cenário real de amanhã. Um único
+        # arquivo continua seguindo exatamente o caminho já testado
+        # (carrega a imagem já na thread principal e usa _worker_imagem);
+        # múltiplos arquivos vão para _worker_imagens, que isola cada
+        # arquivo da mesma forma que _worker_pdf já isola cada página.
+        caminhos = filedialog.askopenfilenames(title="Selecione a(s) foto(s) da(s) folha(s)", filetypes=EXTENSOES_IMAGEM)
+        if not caminhos:
             return
-        try:
-            imagem = _ler_imagem(path)
-        except Exception as exc:
-            messagebox.showerror("Erro ao abrir imagem", str(exc))
+        caminhos = list(caminhos)
+
+        if len(caminhos) == 1:
+            path = caminhos[0]
+            try:
+                imagem = _ler_imagem(path)
+            except Exception as exc:
+                messagebox.showerror("Erro ao abrir imagem", str(exc))
+                return
+            self._arquivo_atual = os.path.basename(path)
+            self._iniciar_processamento(f"Processando {self._arquivo_atual} ...")
+            threading.Thread(target=self._worker_imagem, args=(imagem,), daemon=True).start()
+            self.after(100, self._verificar_fila)
             return
-        self._arquivo_atual = os.path.basename(path)
-        self._iniciar_processamento(f"Processando {self._arquivo_atual} ...")
-        threading.Thread(target=self._worker_imagem, args=(imagem,), daemon=True).start()
+
+        self._arquivo_atual = f"{len(caminhos)} imagens selecionadas"
+        self._iniciar_processamento(f"Processando 0/{len(caminhos)} imagens ...")
+        threading.Thread(target=self._worker_imagens, args=(caminhos,), daemon=True).start()
         self.after(100, self._verificar_fila)
 
     def _on_selecionar_pdf(self):
@@ -239,6 +265,11 @@ class App(tk.Tk):
         self.btn_limpar.config(state="disabled")
         self.btn_salvar.config(state="disabled")
         self.lbl_status.config(text=texto_status)
+        # Progresso é sempre reiniciado a cada nova leva (imagem única,
+        # lote de imagens ou PDF) -- reflete o andamento DESTA leva, não
+        # o acumulado de sessões anteriores (ver _atualizar_status).
+        self._total_paginas_lote = None
+        self._paginas_processadas_lote = 0
 
     def _finalizar_processamento(self):
         self._processando = False
@@ -295,12 +326,50 @@ class App(tk.Tk):
             logging.exception("Falha inesperada processando imagem (página %s)", numero)
             self._fila_resultados.put(("erro_fatal", "Erro inesperado processando a imagem", str(exc)))
 
+    def _worker_imagens(self, caminhos):
+        """
+        Processa uma LISTA de arquivos de imagem (seleção múltipla -- ex.:
+        o lote de ~50 fotos do dia), com o MESMO isolamento de falha por
+        página que _worker_pdf já usa para páginas de PDF: um arquivo que
+        não abre (corrompido, formato inesperado, não é imagem) ou que
+        falha em qualquer etapa interna de _processar_uma_pagina vira uma
+        linha de ERRO para aquela página e o lote CONTINUA -- uma foto
+        ruim nunca aborta as demais 49.
+        """
+        total = len(caminhos)
+        self._fila_resultados.put(("total", total))
+        try:
+            for caminho in caminhos:
+                numero = self._proximo_numero_pagina
+                nome_arquivo = os.path.basename(caminho)
+                try:
+                    imagem_bgr = _ler_imagem(caminho)
+                except Exception as exc:
+                    self._fila_resultados.put(
+                        ("pagina", numero, None, None, [], f"Falha ao abrir '{nome_arquivo}': {exc}")
+                    )
+                    self._proximo_numero_pagina = numero + 1
+                    continue
+
+                imagem_processada, registros, erro = self._processar_uma_pagina(imagem_bgr)
+                if erro:
+                    erro = f"'{nome_arquivo}': {erro}"
+                self._fila_resultados.put(("pagina", numero, imagem_bgr, imagem_processada, registros, erro))
+                self._proximo_numero_pagina = numero + 1
+        except Exception as exc:
+            logging.exception("Falha inesperada processando lote de imagens")
+            self._fila_resultados.put(("erro_fatal", "Erro inesperado processando as imagens", str(exc)))
+            return
+
+        self._fila_resultados.put(("fim", total))
+
     def _worker_pdf(self, caminho_pdf):
         try:
             total = pdf_reader.contar_paginas(caminho_pdf)
         except Exception as exc:
             self._fila_resultados.put(("erro_fatal", "Erro ao abrir o PDF", str(exc)))
             return
+        self._fila_resultados.put(("total", total))
 
         try:
             for pagina_pdf in pdf_reader.iterar_paginas(caminho_pdf):
@@ -341,9 +410,15 @@ class App(tk.Tk):
             messagebox.showerror(titulo, mensagem)
             return
 
+        if tipo == "total":
+            self._total_paginas_lote = item[1]
+            self._atualizar_status()
+            return
+
         if tipo == "pagina":
             _, numero, imagem_original, imagem_processada, registros, erro = item
             self._paginas_processadas += 1
+            self._paginas_processadas_lote += 1
             if erro:
                 self._paginas_com_erro += 1
                 self._erros_paginas.append({"pagina": numero, "mensagem": erro})
@@ -374,8 +449,19 @@ class App(tk.Tk):
             return
 
     def _atualizar_status(self, concluido=False):
+        # Fase 7 (operação em lote): enquanto processando, mostra
+        # progresso "X/Y" da leva atual quando o total é conhecido (PDF,
+        # ou seleção múltipla de imagens) -- um lote de ~50 folhas reais
+        # leva bem mais de meia hora, e não ter nenhum indício de quanto
+        # falta é o tipo de incerteza que leva o operador a fechar o
+        # programa achando que travou, perdendo tudo que já tinha sido
+        # processado (nada é salvo em disco até "Gerar planilha").
+        if not concluido and self._total_paginas_lote:
+            rotulo_paginas = f"Página {self._paginas_processadas_lote}/{self._total_paginas_lote}"
+        else:
+            rotulo_paginas = f"Páginas: {self._paginas_processadas}"
         partes = [
-            f"Páginas: {self._paginas_processadas}",
+            rotulo_paginas,
             f"Confirmados: {self._contador_confirmados}",
             f"Revisão: {self._contador_revisao}",
         ]
@@ -499,6 +585,8 @@ class App(tk.Tk):
         self._contador_revisao = 0
         self._paginas_processadas = 0
         self._paginas_com_erro = 0
+        self._total_paginas_lote = None
+        self._paginas_processadas_lote = 0
         self._proximo_numero_pagina = 1
         self.btn_salvar.config(state="disabled")
         self.btn_revisao.config(text="Abrir revisão (0)", state="disabled")
@@ -539,9 +627,27 @@ class App(tk.Tk):
     # Janela de revisão manual
     # ------------------------------------------------------------------
     def _abrir_revisao(self):
-        pendentes = [(i, r) for i, r in enumerate(self._registros_exportacao) if r["status"] != "CONFIRMADO"]
+        # Fase 7 (PROBLEMA E): só registros REVISAO entram aqui -- linhas
+        # ERRO (falha de página inteira: OCR não rodou, PDF não abriu
+        # etc.) não têm nenhum campo de verdade para corrigir, e permitir
+        # "confirmar" uma delas digitando valores do zero seria inventar
+        # dado sem nenhuma evidência de OCR por trás. Página com ERRO
+        # precisa ser reprocessada (nova foto/novo PDF), não corrigida
+        # campo a campo -- ver botão "Erros de página". Isso também
+        # elimina a dessincronia que existia entre este contador e
+        # `self._contador_revisao` (que nunca contava ERRO).
+        pendentes = [(i, r) for i, r in enumerate(self._registros_exportacao) if r["status"] == "REVISAO"]
         if not pendentes:
-            messagebox.showinfo("Revisão", "Não há registros pendentes de revisão.")
+            if self._erros_paginas:
+                messagebox.showinfo(
+                    "Revisão",
+                    "Não há registros em revisão manual.\n\n"
+                    f"Há {len(self._erros_paginas)} página(s) com ERRO de processamento — "
+                    "veja o botão \"Erros de página\" (essas páginas precisam ser "
+                    "reprocessadas, não corrigidas campo a campo).",
+                )
+            else:
+                messagebox.showinfo("Revisão", "Não há registros pendentes de revisão.")
             return
 
         janela = tk.Toplevel(self)
@@ -587,6 +693,18 @@ class App(tk.Tk):
         tabela.bind("<<TreeviewSelect>>", _ao_selecionar)
 
         def _confirmar():
+            # Fase 7 (PROBLEMAS C/D — segurança contra falso CONFIRMADO):
+            # esta função ANTES marcava CONFIRMADO incondicionalmente, só
+            # por o operador ter clicado o botão, sem checar se a correção
+            # realmente resolveu o problema, e sem nunca reconsultar a
+            # base de colaboradores pela matrícula corrigida (Nome/Setor/
+            # Cargo ficavam travados em "(não encontrado)" mesmo com a
+            # matrícula certa). Agora reconstrói um Registro sintético com
+            # os valores digitados e roda a MESMA validação do fluxo
+            # automático (validacao.classificar_registro) -- reutiliza a
+            # regra existente, não cria nenhuma nova. Confiança 1.0 nos
+            # campos digitados: foram verificados por uma pessoa, deixaram
+            # de ser uma hipótese de OCR (não é um valor inventado).
             sel = tabela.selection()
             if not sel:
                 messagebox.showwarning("Revisão", "Selecione um registro na lista.")
@@ -594,23 +712,85 @@ class App(tk.Tk):
             item_id = sel[0]
             indice = indices_por_item[item_id]
             registro = self._registros_exportacao[indice]
-            registro["matricula"] = campos_edicao["matricula"].get().strip()
-            registro["gestor"] = campos_edicao["gestor"].get().strip()
-            registro["motivo"] = campos_edicao["motivo"].get().strip()
-            registro["status"] = "CONFIRMADO"
-            registro["observacao"] = "corrigido manualmente"
 
-            self._contador_revisao -= 1
-            self._contador_confirmados += 1
-            self._atualizar_status(concluido=True)
+            matricula_digitada = campos_edicao["matricula"].get().strip()
+            gestor_digitado = campos_edicao["gestor"].get().strip()
+            motivo_digitado = campos_edicao["motivo"].get().strip()
+            matricula_normalizada = normalizar_matricula(matricula_digitada) if matricula_digitada else ""
+
+            campos_sinteticos = {}
+            if registro.get("data"):
+                campos_sinteticos["data"] = CampoOcr(texto=registro["data"], confianca=1.0, box=None)
+            if registro.get("hora"):
+                campos_sinteticos["hora"] = CampoOcr(texto=registro["hora"], confianca=1.0, box=None)
+            if matricula_normalizada:
+                campos_sinteticos["matricula"] = CampoOcr(texto=matricula_normalizada, confianca=1.0, box=None)
+            if gestor_digitado:
+                campos_sinteticos["gestor"] = CampoOcr(texto=gestor_digitado, confianca=1.0, box=None)
+            if motivo_digitado:
+                campos_sinteticos["motivo"] = CampoOcr(texto=motivo_digitado, confianca=1.0, box=None)
+            registro_sintetico = Registro(indice=0, campos=campos_sinteticos)
+
+            # PROBLEMA C: re-consulta a base pela matrícula corrigida --
+            # Nome/Setor/Cargo têm que refletir a matrícula certa, nunca
+            # ficar mostrando "(não encontrado)" para um registro que
+            # acabou de ser confirmado com uma matrícula válida.
+            colaborador = (
+                self._data_manager.buscar_colaborador(matricula_normalizada) if matricula_normalizada else None
+            )
+
+            resultado = classificar_registro(registro_sintetico, colaborador, self._data_manager)
+
+            registro["matricula"] = matricula_normalizada or matricula_digitada
+            registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
+            registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
+            registro["setor"] = colaborador["setor"] if colaborador else NAO_ENCONTRADO
+            registro["hora"] = resultado.hora_confirmada or ""
+            registro["gestor"] = resultado.gestor_confirmado or gestor_digitado
+            registro["motivo"] = resultado.motivo_confirmado or motivo_digitado
+            if matricula_normalizada:
+                registro["confianca_matricula"] = 1.0
+            if gestor_digitado:
+                registro["confianca_gestor"] = 1.0
+            if motivo_digitado:
+                registro["confianca_motivo"] = 1.0
+
+            status_anterior = registro["status"]
+            registro["status"] = resultado.status
+            if resultado.status == "CONFIRMADO":
+                registro["observacao"] = (
+                    "corrigido manualmente" if not resultado.observacao
+                    else f"corrigido manualmente; {resultado.observacao}"
+                )
+            else:
+                registro["observacao"] = f"revisão manual incompleta -- {resultado.observacao}"
+
             self._sincronizar_tabela_principal()
 
-            tabela.delete(item_id)
-            del indices_por_item[item_id]
-            self.btn_revisao.config(text=f"Abrir revisão ({self._contador_revisao})",
-                                     state="normal" if self._contador_revisao else "disabled")
-            if not indices_por_item:
-                janela.destroy()
+            if resultado.status == "CONFIRMADO":
+                if status_anterior != "CONFIRMADO":
+                    self._contador_revisao -= 1
+                    self._contador_confirmados += 1
+                tabela.delete(item_id)
+                del indices_por_item[item_id]
+                self.btn_revisao.config(text=f"Abrir revisão ({self._contador_revisao})",
+                                         state="normal" if self._contador_revisao else "disabled")
+                if not indices_por_item:
+                    janela.destroy()
+            else:
+                # Ainda não pôde ser confirmado (ex.: o problema real era
+                # a DATA, que este formulário não edita) -- permanece na
+                # lista de pendentes, com a observação atualizada, em vez
+                # de desaparecer como se tivesse sido resolvido.
+                tabela.item(item_id, values=(
+                    registro["pagina_origem"], registro["matricula"], registro["gestor"],
+                    registro["motivo"], registro["observacao"],
+                ))
+                messagebox.showinfo(
+                    "Revisão", f"Ainda não é possível confirmar este registro:\n\n{resultado.observacao}"
+                )
+
+            self._atualizar_status(concluido=True)
 
         ttk.Button(frame_edicao, text="Confirmar correção", command=_confirmar).grid(row=0, column=6, padx=(10, 0))
 
