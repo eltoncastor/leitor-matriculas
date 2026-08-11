@@ -394,7 +394,26 @@ class App(tk.Tk):
     def _verificar_fila(self):
         try:
             while True:
-                self._processar_item(self._fila_resultados.get_nowait())
+                item = self._fila_resultados.get_nowait()
+                try:
+                    self._processar_item(item)
+                except Exception:
+                    # Fase 8 (segurança do lote): antes, uma exceção
+                    # inesperada processando UM item (ex.: um dado
+                    # malformado vindo do worker) escapava daqui, e como
+                    # isso acontece dentro de um callback agendado via
+                    # self.after, o Tkinter só reporta no console e segue
+                    # -- MAS o `self.after(100, self._verificar_fila)` lá
+                    # embaixo nunca era reagendado, então o polling da
+                    # fila parava para sempre. O worker continuava
+                    # rodando e enfileirando páginas normalmente, só que
+                    # ninguém mais as consumia: a UI parecia travada em
+                    # "Processando...", sem nunca gerar a XLSX, com o
+                    # lote inteiro (até ~50 páginas de OCR já feito)
+                    # preso na fila em memória. Isola cada item da mesma
+                    # forma que cada página já é isolada nos workers --
+                    # um item ruim é só logado, e a fila continua.
+                    logging.exception("Falha ao processar item da fila de resultados (item ignorado, lote continua)")
         except queue.Empty:
             pass
         if self._processando:
@@ -440,6 +459,18 @@ class App(tk.Tk):
                     self.btn_avisos_contagem.config(
                         text=f"Avisos de contagem ({len(self._avisos_contagem)})", state="normal"
                     )
+
+            # Fase 8 (segurança do lote): só em uma LEVA de verdade (PDF
+            # ou seleção múltipla de imagens -- _total_paginas_lote
+            # conhecido; uma imagem única não aciona isto, ver
+            # _autosave_lote). Protege contra a perda TOTAL de ~50
+            # páginas de OCR (quase 1h de trabalho) se o processo inteiro
+            # morrer antes do operador clicar "Gerar planilha" -- algo
+            # que nenhum try/except em Python evita (ex.: uma falha
+            # nativa fora do interpretador).
+            if self._total_paginas_lote:
+                self._autosave_lote()
+
             self._atualizar_status()
             return
 
@@ -593,6 +624,48 @@ class App(tk.Tk):
         self.btn_erros_pag.config(text="Erros de página (0)", state="disabled")
         self.btn_avisos_contagem.config(text="Avisos de contagem (0)", state="disabled")
         self.lbl_status.config(text="Resultados limpos. Nenhum arquivo selecionado.")
+
+    @staticmethod
+    def _pasta_saida_padrao() -> str:
+        # app.py está em src/leitor_matriculas/ui/ -- a raiz do projeto
+        # fica 3 níveis acima (ui -> leitor_matriculas -> src -> raiz),
+        # mesmo cálculo já usado em dados/data_manager.py para achar a
+        # pasta dados/ a partir de um módulo na mesma profundidade.
+        raiz_projeto = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+        )
+        return os.path.join(raiz_projeto, "saida")
+
+    def _autosave_lote(self):
+        """
+        Fase 8 (segurança do lote): salva uma cópia de segurança de TUDO
+        que já foi processado até agora, reaproveitando exatamente o
+        mesmo xlsx_exporter.export_to_xlsx que "Gerar planilha" usa --
+        mesmo formato, mesma ordem física, nenhuma dependência nova. Se
+        o processo inteiro morrer no meio de um lote de ~50 páginas
+        (quase 1h de OCR), o operador não perde tudo: reabre este
+        arquivo, que tem tudo que já tinha sido processado até a última
+        página antes da falha.
+
+        Nunca pode interromper o processamento: qualquer falha aqui
+        (arquivo aberto no Excel, disco cheio, pasta sem permissão) é só
+        registrada no log -- o lote continua normalmente, exatamente
+        como qualquer outro isolamento de falha já existente no projeto.
+        """
+        if not self._registros_exportacao:
+            return
+        try:
+            pasta_saida = self._pasta_saida_padrao()
+            os.makedirs(pasta_saida, exist_ok=True)
+            caminho = os.path.join(pasta_saida, "Liberacoes_autosave.xlsx")
+            xlsx_exporter.export_to_xlsx(
+                self._registros_exportacao, caminho,
+                paginas_processadas=self._paginas_processadas,
+                paginas_com_erro=self._paginas_com_erro,
+                paginas_com_contagem_divergente=len(self._avisos_contagem),
+            )
+        except Exception:
+            logging.exception("Falha ao salvar cópia de segurança automática (lote continua normalmente)")
 
     def _on_salvar(self):
         if not self._registros_exportacao:
