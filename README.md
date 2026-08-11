@@ -123,10 +123,12 @@ leitor_matriculas/
 │       │   └── pdf_reader.py
 │       ├── parsing/            reconstrução dos registros
 │       │   ├── registro_parser.py
-│       │   └── tempo_parser.py
+│       │   ├── tempo_parser.py
+│       │   └── contexto_lote.py
 │       ├── validacao/          classificação dos registros
 │       │   ├── regras.py
-│       │   └── correspondencia_aproximada.py
+│       │   ├── correspondencia_aproximada.py
+│       │   └── recuperacao_matricula.py
 │       ├── dados/              bases XLSX de apoio
 │       │   └── data_manager.py
 │       ├── exportacao/         geração da saída
@@ -165,8 +167,10 @@ O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acr
 | `ocr/pdf_reader.py`                                | Renderização de PDFs página por página                   |
 | `parsing/registro_parser.py`                       | Agrupamento espacial dos elementos OCR em registros      |
 | `parsing/tempo_parser.py`                          | Interpretação e validação de Data/Hora                   |
+| `parsing/contexto_lote.py`                         | Contexto do lote (ano das datas já lidas)                |
 | `dados/data_manager.py`                            | Carregamento das bases XLSX                              |
 | `validacao/correspondencia_aproximada.py`          | Correspondência aproximada controlada                    |
+| `validacao/recuperacao_matricula.py`               | Recuperação da matrícula para dígitos                    |
 | `validacao/regras.py`                              | Classificação dos registros                              |
 | `exportacao/xlsx_exporter.py`                      | Geração da planilha XLSX                                 |
 | `exportacao/csv_exporter.py`                       | Exportação CSV legada (não ligada à interface)           |
@@ -216,6 +220,22 @@ Essas formas podem representar aliases ou identificadores alternativos e não ne
 ### Motivos.xlsx
 
 Contém os motivos válidos utilizados na validação e na correspondência aproximada controlada.
+
+A lista de motivos é **fechada**. Nesta versão do sistema, os únicos motivos válidos são:
+
+```text
+HORÁRIO NEGADO
+RH
+ADM
+ARMÁRIOS
+FOLGA FIXA
+ESQUECEU CRACHÁ
+TREINAMENTO
+```
+
+O campo `Motivo` de um registro `CONFIRMADO` sempre contém um desses valores — o sistema não cria motivos novos nem exporta ruído de OCR como motivo confirmado.
+
+`NEGADO` e `NEGADA` **não são motivos independentes** nesta versão: quando reconhecidos, são normalizados para `HORÁRIO NEGADO`.
 
 ---
 
@@ -267,23 +287,24 @@ A ordem das liberações é preservada de acordo com a ordem encontrada no papel
 
 ## Validação
 
-O sistema trabalha principalmente com dois estados:
+Cada linha da planilha recebe um destes três estados:
 
 ### CONFIRMADO
 
 Registro em que os dados necessários puderam ser identificados e validados com segurança.
 
-A confirmação considera principalmente:
+A confirmação considera:
 
-* Matrícula;
-* Data;
-* Motivo;
-* Responsável;
+* Matrícula (presente, só com dígitos e encontrada na base, acima do piso de confiança do OCR);
+* Data (presente e interpretável);
+* Motivo (presente e reconhecido na lista fechada);
+* Responsável (presente e identificado na base de gestores);
 * bases de validação disponíveis;
-* confiança do OCR;
-* correspondências aproximadas quando aplicáveis.
+* correspondências aproximadas e normalizações, quando aplicáveis.
 
 A Hora **não é obrigatória** para confirmação.
+
+Motivo e Responsável, ao contrário, **são obrigatórios**: uma coluna em branco não é "vazia e válida" — é uma linha que o OCR não conseguiu ler, e vai para `REVISÃO`. Sem essa regra, o registro sairia `CONFIRMADO` com a célula em branco, indistinguível de um valor conferido.
 
 ### REVISÃO
 
@@ -291,14 +312,24 @@ Registro que contém alguma informação necessária que não pôde ser confirma
 
 Exemplos:
 
-* matrícula ilegível;
-* matrícula não encontrada;
-* gestor ambíguo;
-* motivo não reconhecido;
-* data inválida ou incompleta;
+* matrícula ilegível, ausente, não encontrada na base ou com duas leituras plausíveis;
+* gestor ambíguo, cortado ou irreconhecível;
+* motivo não reconhecido ou com evidência insuficiente;
+* data inválida, incompleta ou com ano que destoa do restante do lote;
+* motivo ou responsável ausentes;
 * informação insuficiente para confirmação.
 
+Uma normalização aceita em um campo **não confirma o registro sozinha**: recuperar o motivo não compensa um responsável incerto, e recuperar a data não compensa uma matrícula duvidosa.
+
 O sistema prefere enviar um registro para `REVISÃO` a inventar ou associar uma informação sem evidência suficiente.
+
+### ERRO
+
+Falha de **página inteira**, não de linha: a imagem não abriu, o pré-processamento falhou, o OCR não rodou, a página do PDF não renderizou.
+
+Uma linha `ERRO` não tem campo nenhum de verdade para corrigir, então ela **não aparece na janela de revisão manual** — digitar valores ali seria inventar dados sem nenhuma evidência de OCR por trás. A página precisa ser reprocessada (nova foto ou novo PDF).
+
+Uma página com `ERRO` nunca interrompe o lote: as demais continuam sendo processadas normalmente.
 
 ---
 
@@ -337,6 +368,83 @@ Responsável = GRX - GESTOR EXEMPLO
 O texto desconhecido é ignorado.
 
 Não existe reconhecimento de informações adicionais de auxiliares no resultado principal.
+
+---
+
+## Normalizações e recuperações de OCR
+
+Além da correspondência aproximada, o sistema desfaz deformações **previsíveis** de OCR manuscrito. Todas seguem o mesmo padrão de evidência:
+
+```text
+gerar as leituras plausíveis por uma tabela FECHADA de confusões de OCR
+    ↓
+perguntar à base (ou ao contexto do lote) quais existem de verdade
+    ↓
+existe exatamente uma  → aceita
+existem duas ou mais   → ambíguo, ninguém escolhe → REVISÃO
+não existe nenhuma     → REVISÃO
+```
+
+Nenhuma dessas etapas inventa caractere: cada troca vem de uma confusão conhecida, e o resultado ainda passa pela validação normal do campo.
+
+Toda normalização aceita fica registrada na coluna `Observação`, junto com o texto original do OCR — nada é corrigido em silêncio.
+
+### Motivo
+
+Reconhecimento estrutural da família `HORÁRIO NEGADO`: o texto é quebrado em partes, procura-se a que carrega o núcleo (`NEGADO`/`NEGADA`), e as confusões conhecidas são desfeitas (dígito lido no lugar de letra, `n`/`v`/`w`/`m` cursivos, `d` quebrado em dois caracteres).
+
+A aceitação exige **evidência combinada**: similaridade alta sozinha, ou similaridade média mais um segundo critério independente. Em qualquer caso, a evidência da família ainda precisa superar com folga a semelhança com os outros motivos da lista fechada — é essa checagem que impede `RH`, `ADM`, `ARMÁRIOS`, `FOLGA FIXA`, `ESQUECEU CRACHÁ` e `TREINAMENTO` de serem absorvidos indevidamente.
+
+Um texto sem evidência suficiente **não** vira `HORÁRIO NEGADO`: vai para `REVISÃO`.
+
+### Responsável
+
+Quando o código do gestor está legível, ele identifica o gestor sozinho e prevalece sobre o texto secundário — que costuma ser um nome anotado ao lado, ilegível no OCR.
+
+O código é lido pela tabela fechada de confusões e confirmado contra a base de gestores. Se mais de um código cadastrado for leitura plausível, o registro vai para `REVISÃO`.
+
+Uma identificação mais específica presente na base sempre ganha do código isolado.
+
+### Data
+
+Saída sempre em `DD/MM/AA`.
+
+* separadores deformados ou multiplicados são corrigidos quando os dígitos são inequívocos;
+* uma caixa em que o OCR colou Data e Hora é separada quando cada metade valida por conta própria;
+* datas impossíveis continuam recusadas;
+* quando a data não pode ser interpretada com segurança, a célula sai **vazia** e o registro vai para `REVISÃO` — o texto original fica na `Observação`.
+
+### Hora
+
+Saída sempre em `HH:MM`.
+
+Separadores trocados ou apagados pelo OCR são normalizados, e uma hora colada a outro texto na mesma caixa é recuperada quando existe exatamente um trecho com forma de hora e nenhum dígito sobrando fora dele.
+
+Horas impossíveis continuam recusadas e a célula sai vazia — ver a seção *Hora*, acima.
+
+### Matrícula
+
+A matrícula exportada contém **exclusivamente dígitos** (`0-9`). Nunca sai com `+`, `.`, `-`, espaços ou letras.
+
+Os caracteres estranhos não são simplesmente apagados: eles costumam **ser** um dígito lido errado, e removê-los mudaria a matrícula para a de outra pessoa. A leitura correta é escolhida pela existência na base de colaboradores.
+
+Se nenhuma leitura resolver com segurança, a célula sai vazia, o registro vai para `REVISÃO` e a linha é contabilizada no aviso "Linhas sem matrícula" da interface — uma liberação real nunca é descartada.
+
+### Contexto do lote
+
+Fotos e páginas processadas juntas formam um **lote**, e o que uma folha comprova pode resolver outra.
+
+Hoje o contexto guarda apenas o **ano** das datas já lidas. Quando o OCR entrega uma data sem ano (`23.04`) — porque o ano foi escrito pequeno ou ficou cortado na foto —, o ano pode ser completado a partir das outras folhas do mesmo lote.
+
+Isso não é suposição: o ano está escrito, só que em outra página da mesma remessa. A `Observação` registra que o ano veio do contexto, junto com o texto original.
+
+O contexto é conservador:
+
+* só entram datas interpretadas por completo — uma data recuperada por contexto nunca realimenta o contexto;
+* é preciso um mínimo de datas confirmadas; uma folha legível não é "o contexto do lote";
+* o ano precisa ser predominante com folga. Um lote que de fato atravessa a virada do ano **não elege ano nenhum**, e as datas sem ano continuam em `REVISÃO`;
+* o caminho inverso também vale: uma data cujo ano **está escrito** mas destoa do restante do lote vai para `REVISÃO`. O ano não é reescrito — apenas se reconhece que aquela linha precisa ser conferida no papel;
+* o contexto é zerado junto com "Limpar resultados" e nunca atravessa dois lotes diferentes.
 
 ---
 
@@ -423,13 +531,20 @@ python teste\teste_erro_pagina.py
 python teste\teste_correspondencia_aproximada.py
 python teste\teste_extracao_fase1.py
 python teste\teste_worker_imagem_falha.py
+python teste\teste_seguranca_lote.py
+python teste\teste_lote_operacional.py
+python teste\teste_normalizacao_ocr.py
+python teste\teste_normalizacao_motivo_hora.py
+python teste\teste_recuperacao_contextual.py
 ```
 
-A suíte atual possui **105 testes sintéticos + integração UI**, todos aprovados no último ciclo de estabilização (Fase 2).
+Todas as suítes acima estão aprovadas no ciclo atual. Com exceção de `teste_ocr.py`, que exige uma foto real como argumento, nenhuma depende de PaddleOCR ou das planilhas reais — as bases usadas são fixtures sintéticas.
+
+`teste_recuperacao_contextual.py` cobre especificamente as normalizações e recuperações descritas acima: família `HORÁRIO NEGADO` e preservação dos outros seis motivos, leitura do código do gestor, contexto do lote (ano completado, ano divergente, lote que atravessa a virada do ano), horas deformadas, matrícula só com dígitos, e a regra de que normalizar um campo não confirma o registro sozinho.
 
 Também foram realizados testes com PaddleOCR real sobre um conjunto de cinco folhas reais.
 
-Resultado:
+Resultado estrutural:
 
 ```text
 Esperado: 40 liberações
@@ -437,6 +552,8 @@ Encontrado: 40 liberações
 
 40/40 = 100%
 ```
+
+Nenhum registro desapareceu ou foi duplicado, a ordem física foi preservada, e nenhuma matrícula, data ou hora saiu fora do formato exigido.
 
 Os dados utilizados nesses testes são locais e não fazem parte do repositório público.
 
@@ -509,6 +626,18 @@ Bases de colaboradores, gestores, motivos, imagens de documentos e arquivos de s
 * O parser ainda trabalha com OCR da página inteira + geometria, sem ROIs fixas por campo.
 * O agrupamento espacial foi validado com um conjunto limitado de folhas reais e pode exigir novos ajustes caso surjam formulários ou condições de captura muito diferentes.
 
+### Limitações das recuperações de OCR
+
+As recuperações descritas acima cobrem deformações **previsíveis**. O que fica de fora continua em `REVISÃO` por falta de evidência — o que é o comportamento pretendido, não uma falha:
+
+* **Responsável cortado ou muito deformado** é o maior grupo de revisões: nome cortado na foto, código com letra que não corresponde a nenhum gestor cadastrado, rabisco. O sistema não escolhe o candidato "mais parecido" só porque ele existe.
+* **Motivo com evidência de um critério só**: leituras muito corrompidas podem ficar acima do limiar mas sem nenhum critério secundário que as corrobore. Preferiu-se `REVISÃO`.
+* **Ano lido errado** não é reescrito, apenas sinalizado. Se um lote tiver muitas datas com o ano mal reconhecido, o contexto do lote é desligado por segurança e as datas sem ano voltam a `REVISÃO`.
+* **O contexto do lote é sequencial**: uma folha sem ano processada antes de o lote acumular datas completas suficientes não é recuperada.
+* **Motivo e Responsável não têm filtro de formato** como Data e Hora têm, então um fragmento de texto impresso do formulário ainda pode, ocasionalmente, cair em uma dessas colunas.
+
+Aumentar o número de `CONFIRMADO` nunca é objetivo em si. É esperado — e aceitável — que uma melhoria apenas corrija os dados internos das linhas sem mudar o status delas.
+
 ### Qualidade da imagem
 
 As folhas reais podem apresentar diferentes níveis de iluminação e tonalidade, inclusive papel reciclado ou mais escuro.
@@ -551,28 +680,28 @@ O repositório contém apenas o código, testes e documentação necessários ao
 
 ---
 
-## Próximas fases
+## Evolução do projeto
 
-O MVP atual está em fase de estabilização.
+A reorganização arquitetural já foi concluída: o código está separado por responsabilidade em `src/leitor_matriculas/`, com dependência de mão única e grafo acíclico, sem alteração de comportamento funcional.
 
-A próxima grande etapa prevista é uma **reorganização arquitetural completa**, sem alteração do comportamento funcional.
-
-Objetivos futuros:
+Percurso até aqui:
 
 ```text
 MVP estável
     ↓
 reorganização da arquitetura
     ↓
-separação clara de responsabilidades
+preparação para operação em lote real
     ↓
-estrutura de pastas mais limpa
-    ↓
-redução de acoplamento
-    ↓
-testes de regressão
+recuperação contextual de OCR
     ↓
 nova evolução funcional
 ```
 
-A refatoração arquitetural deverá preservar os comportamentos já validados e manter a suíte de testes como mecanismo de proteção contra regressões.
+Cada evolução funcional preserva os comportamentos já validados e mantém a suíte de testes como mecanismo de proteção contra regressões.
+
+Direções possíveis a partir daqui, sem compromisso de prazo:
+
+* desempenho do OCR, que hoje concentra a quase totalidade do tempo de processamento;
+* extração por ROI/template da folha, avaliada e **não adotada** — o experimento com fotos reais mostrou substituição incorreta de dígito sem ganho compensatório, e o pipeline atual continua sendo OCR da página inteira + geometria. Uma nova tentativa exigiria política de aceitação mais forte e uma amostra maior de folhas;
+* ampliação das recuperações contextuais, sempre com o mesmo critério: precisão antes de cobertura.
