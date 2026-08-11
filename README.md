@@ -1,51 +1,192 @@
 # Leitor de Matrículas Manuscritas
 
-Ferramenta desktop (Windows, Tkinter) para transformar as folhas físicas de
-liberação do cartão mestre (foto ou PDF do mês) em uma planilha XLSX
-estruturada, com OCR (PaddleOCR), validação contra bases de colaboradores/
-gestores/motivos, e revisão manual dos casos duvidosos.
+Ferramenta desktop para Windows, desenvolvida em Python/Tkinter, que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
 
+O sistema utiliza OCR com PaddleOCR para reconhecer os dados manuscritos, valida as informações contra bases XLSX e envia automaticamente para revisão manual os casos que não podem ser confirmados com segurança.
+
+```text
+FOTO ou PDF
+    ↓
+Pré-processamento (OpenCV)
+    ↓
+OCR (PaddleOCR)
+    ↓
+Parser espacial
+    ↓
+Data | Hora | Matrícula | Motivo | Responsável
+    ↓
+Validação
+    ↓
+CONFIRMADO / REVISÃO
+    ↓
+Planilha XLSX
 ```
-FOTO ou PDF → pré-processamento (OpenCV) → OCR (PaddleOCR 3.x)
-   → parser espacial (agrupa em registros: Data/Hora/Matrícula/Motivo/Responsável)
-   → validação (matrícula, data/hora, gestor, motivo) → consulta a Colaboradores.xlsx (Nome/Setor)
-   → tabela + revisão manual → planilha .xlsx ordenada cronologicamente (Liberações/Revisão/Resumo)
+
+## Dados reconhecidos
+
+A extração principal trabalha somente com os campos existentes na folha:
+
+```text
+Data
+Hora
+Matrícula
+Motivo
+Responsável
 ```
 
-**Importante**: só DATA, HORA, MATRÍCULA, MOTIVO e RESPONSÁVEL são lidos da
-escrita manuscrita da folha. NOME e SETOR nunca são reconhecidos por OCR —
-são sempre obtidos consultando a MATRÍCULA reconhecida em
-`Colaboradores.xlsx` (um PROCV/XLOOKUP conceitual). Se a matrícula não for
-encontrada na base, o registro vai para Revisão e nome/setor aparecem como
-`(não encontrado)` — nunca em branco, nunca associados a outra pessoa.
+### Nome e Setor
 
-## Estrutura do projeto
+**Nome e Setor não são reconhecidos por OCR.**
 
+Esses dados não fazem parte do resultado principal da extração e serão obtidos posteriormente a partir da matrícula, por exemplo utilizando `PROCX/XLOOKUP` em outra planilha.
+
+Isso evita processamento desnecessário e reduz o risco de associar uma pessoa incorreta a uma matrícula.
+
+### Hora
+
+A Hora é um campo **opcional**.
+
+Se Data + Matrícula + Motivo + Responsável forem confirmados, a ausência ou ilegibilidade da Hora não impede a confirmação do registro.
+
+Quando a Hora não puder ser reconhecida com segurança:
+
+```text
+Hora = vazia
 ```
+
+O sistema nunca inventa uma hora.
+
+### Responsável
+
+O campo Responsável representa principalmente o **gestor que autorizou a liberação**.
+
+Algumas folhas podem conter texto adicional após o gestor, como o nome de um auxiliar que estava na portaria. Esse texto residual é ignorado.
+
+Exemplo:
+
+```text
+GRL - FABIANA - ESLEON
+```
+
+Resultado:
+
+```text
+Responsável = GRL - FABIANA
+```
+
+O sistema não tenta identificar ou corrigir o nome do auxiliar.
+
+Nomes compostos e identificações com código de cargo são preservados.
+
+Exemplos válidos:
+
+```text
+GR3 - DIANA
+GR4 - ANDRÉ VALENÇA
+ANDERSON ABREU
+ANDERSON CARLOS
+```
+
+Quando o gestor não puder ser identificado com segurança, o registro é enviado para `REVISÃO`.
+
+---
+
+## Arquitetura atual
+
+```text
 leitor_matriculas/
-├── main.py              # ponto de entrada
-├── ui.py                 # interface Tkinter (coordena os módulos abaixo)
-├── ocr_engine.py          # PaddleOCR 3.x + normalização de matrícula
-├── image_processor.py     # pré-processamento OpenCV
-├── pdf_reader.py           # PDF → imagem, página a página
-├── registro_parser.py      # agrupa OCR (texto+box) em registros da tabela
-├── tempo_parser.py          # interpretação estruturada de data/hora
-├── data_manager.py           # leitura de dados/*.xlsx
-├── correspondencia_aproximada.py  # fuzzy matching controlado (Motivo/Responsável)
-├── validacao.py                # classifica cada registro: CONFIRMADO/REVISAO
-├── xlsx_exporter.py             # ordena cronologicamente + gera a planilha final (3 abas)
-├── exporter.py                   # exportação CSV (mais simples; não usada pela UI hoje)
+├── main.py
+├── ui.py
+├── ocr_engine.py
+├── image_processor.py
+├── pdf_reader.py
+├── registro_parser.py
+├── tempo_parser.py
+├── data_manager.py
+├── correspondencia_aproximada.py
+├── validacao.py
+├── xlsx_exporter.py
+├── exporter.py
+│
 ├── dados/
 │   ├── LEIA-ME.txt
-│   ├── Colaboradores.xlsx     # você adiciona
-│   ├── Gestores.xlsx          # você adiciona
-│   └── Motivos.xlsx           # você adiciona
-├── teste/                      # um arquivo de teste por módulo
+│   ├── Colaboradores.xlsx
+│   ├── Gestores.xlsx
+│   └── Motivos.xlsx
+│
+├── teste/
 ├── requirements.txt
 └── README.md
 ```
 
-## Instalação (Windows, PowerShell)
+A estrutura atual ainda será reorganizada em uma futura fase de refatoração arquitetural. Essa reorganização deverá preservar o comportamento e os testes existentes.
+
+---
+
+## Principais módulos
+
+| Arquivo                         | Responsabilidade                                         |
+| ------------------------------- | -------------------------------------------------------- |
+| `main.py`                       | Ponto de entrada                                         |
+| `ui.py`                         | Interface gráfica Tkinter e coordenação do processamento |
+| `ocr_engine.py`                 | Inicialização e execução do PaddleOCR                    |
+| `image_processor.py`            | Pré-processamento das imagens                            |
+| `pdf_reader.py`                 | Renderização de PDFs página por página                   |
+| `registro_parser.py`            | Agrupamento espacial dos elementos OCR em registros      |
+| `tempo_parser.py`               | Interpretação e validação de Data/Hora                   |
+| `data_manager.py`               | Carregamento das bases XLSX                              |
+| `correspondencia_aproximada.py` | Correspondência aproximada controlada                    |
+| `validacao.py`                  | Classificação dos registros                              |
+| `xlsx_exporter.py`              | Geração da planilha XLSX                                 |
+| `exporter.py`                   | Exportação CSV legada                                    |
+
+---
+
+## Bases de dados
+
+As bases utilizadas pelo sistema ficam em:
+
+```text
+dados/
+├── Colaboradores.xlsx
+├── Gestores.xlsx
+└── Motivos.xlsx
+```
+
+### Colaboradores.xlsx
+
+Utilizada para validação da matrícula.
+
+O sistema não precisa reconhecer Nome ou Setor por OCR.
+
+A matrícula é utilizada posteriormente para obter essas informações.
+
+### Gestores.xlsx
+
+Contém os gestores e suas possíveis formas de identificação.
+
+A base pode conter:
+
+```text
+GR3 - DIANA
+GR3
+DIANA
+ANDERSON ABREU
+ABREU
+A. ABREU
+```
+
+Essas entradas não devem necessariamente ser interpretadas como pessoas diferentes. Algumas podem representar aliases, códigos ou formas alternativas de identificação.
+
+### Motivos.xlsx
+
+Contém os motivos válidos utilizados na validação e no fuzzy matching controlado.
+
+---
+
+## Instalação
+
+Windows + PowerShell:
 
 ```powershell
 cd leitor_matriculas
@@ -55,16 +196,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 pip install -r requirements.txt
 ```
 
-A primeira execução do PaddleOCR baixa os modelos (precisa de internet uma
-vez; depois funciona offline).
+Na primeira execução, o PaddleOCR pode baixar os modelos necessários.
 
-## Bases XLSX (opcional, mas recomendado)
+Após os modelos estarem disponíveis, o processamento pode funcionar localmente sem depender de serviços externos.
 
-Coloque em `dados/`: `Colaboradores.xlsx`, `Gestores.xlsx`, `Motivos.xlsx`.
-O programa funciona sem eles (mostra aviso, e todo registro fica em
-REVISÃO por falta de como confirmar a matrícula). Se os cabeçalhos reais
-tiverem nomes diferentes dos esperados, ajuste as listas
-`COLUNAS_CANDIDATAS_*` no topo de `data_manager.py`.
+---
 
 ## Executar
 
@@ -72,117 +208,310 @@ tiverem nomes diferentes dos esperados, ajuste as listas
 python main.py
 ```
 
-- **Selecionar imagem**: processa uma foto de folha.
-- **Selecionar PDF**: processa o PDF do mês inteiro, página por página
-  (não carrega todas as páginas na memória de uma vez); uma página que
-  falhar ao renderizar não interrompe as demais — fica registrada em
-  "Erros de página" e como status `ERRO` na planilha final.
-- Resultados de várias seleções se acumulam na mesma tabela — use
-  **Limpar resultados** para começar do zero.
-- **Abrir revisão**: lista só os registros não confirmados; permite
-  corrigir matrícula/gestor/motivo manualmente e confirmar.
-- **Gerar XLSX**: salva `Liberações` (tudo), `Revisão` (só os pendentes) e
-  `Resumo` (contagens + liberações por gestor/motivo).
+### Selecionar imagem
 
-## Classificação (validacao.py)
+Processa uma foto individual de uma folha.
 
-- **CONFIRMADO**: matrícula reconhecida, data e hora interpretáveis com
-  segurança, matrícula encontrada em `Colaboradores.xlsx`, confiança do
-  OCR ≥ 80%, e — se as respectivas listas estiverem carregadas — gestor e
-  motivo batem com `Gestores.xlsx`/`Motivos.xlsx` (exatamente, ou por
-  correspondência aproximada controlada — ver abaixo).
-- **REVISÃO**: qualquer coisa que não pôde ser confirmada com segurança —
-  matrícula não lida, não encontrada na base, confiança baixa, gestor/
-  motivo fora da lista, base indisponível, **ou data/hora ilegível,
-  impossível, em formato inesperado, vazia, ou sem ano** (ver
-  `tempo_parser.py`). Nunca inventa dado — só marca para revisão.
-- **ERRO**: página que falhou ao processar (PDF corrompido/página
-  ilegível).
+### Selecionar PDF
 
-Nome e Setor nunca são reconhecidos por OCR — são sempre obtidos
-consultando a matrícula em `Colaboradores.xlsx`; quando não encontrados,
-aparecem como `(não encontrado)`, nunca em branco.
+Processa as páginas do PDF individualmente.
 
-**Correspondência aproximada (Motivo/Responsável)**: o campo Motivo e o
-campo Responsável pela autorização passam primeiro por comparação exata
-contra `Motivos.xlsx`/`Gestores.xlsx`; se não bater, o sistema tenta uma
-correspondência aproximada controlada (`correspondencia_aproximada.py`) —
-só aceita quando a similaridade passa de um limiar E não há ambiguidade
-entre os dois candidatos mais parecidos. Ex.: `"neegadho"` reconhece como
-`"NEGADO"`; já um texto ambíguo entre dois motivos parecidos (ou dois
-gestores com nomes parecidos) vai para revisão em vez de escolher um dos
-dois no chute. O texto original do OCR continua disponível na Observação
-sempre que uma correção por aproximação foi aplicada.
+Uma falha em uma página não deve interromper o processamento das demais.
 
-Nada é descartado silenciosamente: todo registro (inclusive erros de
-página) aparece na planilha final, **ordenada cronologicamente por
-data+hora reais** (mais antigo primeiro; registros sem data/hora confiável
-vão para o final, preservados).
+### Revisão
+
+Exibe registros que não puderam ser confirmados automaticamente.
+
+### Gerar XLSX
+
+Gera a planilha final com os registros processados.
+
+A ordem das liberações é preservada de acordo com a ordem encontrada no papel.
+
+---
+
+## Validação
+
+O sistema trabalha principalmente com dois estados:
+
+### CONFIRMADO
+
+Registro em que os dados necessários puderam ser identificados e validados com segurança.
+
+A confirmação considera principalmente:
+
+* Matrícula;
+* Data;
+* Motivo;
+* Responsável;
+* bases de validação disponíveis;
+* confiança do OCR;
+* correspondências aproximadas quando aplicáveis.
+
+A Hora não é obrigatória para confirmação.
+
+### REVISÃO
+
+Registro que contém alguma informação necessária que não pôde ser confirmada com segurança.
+
+Exemplos:
+
+* matrícula ilegível;
+* matrícula não encontrada;
+* gestor ambíguo;
+* motivo não reconhecido;
+* data inválida ou incompleta;
+* informação insuficiente para confirmação.
+
+O sistema não inventa dados para evitar uma revisão.
+
+---
+
+## Correspondência aproximada
+
+O fuzzy matching é controlado e utiliza conjuntos fechados de candidatos.
+
+A prioridade é:
+
+```text
+1. Correspondência exata
+2. Alias conhecido
+3. Correspondência aproximada controlada
+4. Verificação de ambiguidade
+5. REVISÃO quando não houver segurança suficiente
+```
+
+O sistema não deve simplesmente escolher o candidato com maior pontuação.
+
+Se dois candidatos forem muito próximos ou houver ambiguidade, o registro vai para `REVISÃO`.
+
+### Responsável
+
+O gestor deve ser identificado antes que qualquer texto residual seja considerado.
+
+Exemplo:
+
+```text
+OCR:
+GR3 - DIANA - TEXTO_DESCONHECIDO
+
+Resultado:
+Responsável = GR3 - DIANA
+```
+
+O texto desconhecido é ignorado.
+
+Não existe mais reconhecimento de auxiliar de portaria no resultado.
+
+---
+
+## Ordem dos registros
+
+A ordem das liberações encontrada na folha é preservada.
+
+O sistema não deve ordenar os registros por:
+
+* nome;
+* matrícula;
+* gestor;
+* motivo.
+
+A sequência da folha é a referência principal para a saída.
+
+---
+
+## Tratamento de erros
+
+O processamento ocorre em threads para manter a interface responsiva.
+
+Falhas inesperadas durante o processamento de uma imagem são capturadas pelo worker da UI.
+
+Quando o OCR falha:
+
+```text
+erro
+ ↓
+exceção capturada
+ ↓
+erro registrado no log
+ ↓
+mensagem apresentada ao usuário
+ ↓
+estado "Processando" encerrado
+ ↓
+botões restaurados
+```
+
+A interface não deve permanecer indefinidamente presa em `Processando...`.
+
+O processamento de PDF possui tratamento equivalente para erros de página.
+
+---
+
+## Desempenho
+
+O principal gargalo atual é o OCR do PaddleOCR.
+
+Em testes realizados em CPU:
+
+```text
+Renderização PDF       ~0,17 s/página
+Pré-processamento      ~0,81 s/página
+OCR                    ~36,5 s/página
+Parser/validação       ~0,003 s/página
+```
+
+O OCR representa aproximadamente 95% do tempo de processamento.
+
+O `enable_mkldnn` permanece desativado devido a uma incompatibilidade reproduzida entre PaddlePaddle/oneDNN no ambiente Windows/CPU utilizado.
+
+Não foram feitas otimizações de velocidade que comprometam a precisão do OCR.
+
+---
 
 ## Testes
 
+A suíte pode ser executada pelos arquivos individuais em `teste/`.
+
+Exemplos:
+
 ```powershell
-python teste\teste_ocr.py <foto>              # smoke test do OCR real, via terminal
-python teste\teste_data_manager.py [matricula]
-python teste\teste_registro_parser.py          # fixtures sintéticas
-python teste\teste_pdf_reader.py               # PDFs sintéticos
+python teste\teste_ocr.py <foto>
+python teste\teste_data_manager.py
+python teste\teste_registro_parser.py
+python teste\teste_pdf_reader.py
 python teste\teste_validacao.py
-python teste\teste_tempo_parser.py             # interpretação de data/hora, fixtures sintéticas
-python teste\teste_xlsx_exporter.py            # inclui ordenação cronológica e ordem das colunas
-python teste\teste_ui_integracao.py            # fim-a-fim, OCR mockado (precisa de display; roda normal no Windows)
-python teste\teste_erro_pagina.py              # página de PDF com falha não trava o lote
-python teste\teste_correspondencia_aproximada.py  # fuzzy matching de Motivo/Responsável, fixtures sintéticas
-python teste\teste_extracao_fase1.py           # texto impresso, contagem de 8 posições, mesclagem DATA+HORA
+python teste\teste_tempo_parser.py
+python teste\teste_xlsx_exporter.py
+python teste\teste_ui_integracao.py
+python teste\teste_erro_pagina.py
+python teste\teste_correspondencia_aproximada.py
+python teste\teste_extracao_fase1.py
+python teste\teste_worker_imagem_falha.py
 ```
 
-## O que foi testado e como
+A suíte atual possui **100 testes sintéticos + integração UI**, todos aprovados no último ciclo de estabilização.
 
-- **Módulos isolados** (`data_manager`, `registro_parser`, `pdf_reader`,
-  `validacao`, `xlsx_exporter`): testados com fixtures sintéticas —
-  passaram.
-- **Integração UI completa** (imagem única + PDF de várias páginas +
-  classificação + XLSX de 3 abas + correção manual + erro de página):
-  testada com **PaddleOCR mockado** (MagicMock) — passou. O parser
-  espacial, o pré-processamento OpenCV real e o PyMuPDF real (não
-  mockados) rodaram de verdade nesses testes.
-- **OCR real (PaddleOCR de verdade, sobre foto real de folha)**: testado
-  com `teste.jpg` (foto real de uma folha preenchida) e as bases reais em
-  `dados/`. Confirmou, entre outras coisas: reconhecimento correto de
-  matrícula/data/hora/motivo/responsável manuscritos; nome/setor
-  corretamente derivados via matrícula (nunca lidos da folha); a coluna
-  Responsável sendo detectada mesmo com ruído no cabeçalho impresso; texto
-  impresso de rodapé (título, código do formulário) não virando registro
-  nem valor de campo; separação de um caso real de DATA+HORA mescladas
-  numa única caixa de OCR; e correção por aproximação de motivos
-  manuscritos com erro de OCR (ex.: "Neegadho" → "NEGADO"). Ver o relatório
-  da Fase 1 de precisão da extração para os números completos e as
-  limitações residuais encontradas nesse teste real.
+Também foram realizados testes com PaddleOCR real sobre um PDF contendo **5 folhas reais**.
 
-## Limitações conhecidas
+Resultado:
 
-- Fuzzy matching de gestor/motivo não existe — a comparação com
-  `Gestores.xlsx`/`Motivos.xlsx` é exata (ignorando acento/maiúscula). Um
-  texto ligeiramente diferente do cadastro vai para revisão em vez de ser
-  auto-corrigido — intencional, para nunca "adivinhar" errado.
-- A janela de revisão não mostra o recorte da imagem da folha (só o texto
-  reconhecido) — manter todas as imagens de um mês inteiro em memória para
-  isso não seria viável (~200 páginas).
-- "Abrir a pasta do resultado" usa `os.startfile`, que só existe no
-  Windows — em outros sistemas essa etapa é ignorada silenciosamente.
-- O limiar de confiança mínima da matrícula (80%) é uma constante em
-  `validacao.py` (`CONFIANCA_MINIMA_MATRICULA`) — ajuste se, na prática,
-  se mostrar alto/baixo demais.
-- Threshold de agrupamento espacial (`registro_parser.py`) foi validado com
-  fixtures sintéticas; pode precisar de ajuste fino com folhas reais muito
-  tortas/rotacionadas.
-- O parser ainda é "OCR da página inteira + geometria" (não usa template
-  fixo nem recorte por região/campo). MOTIVO e RESPONSÁVEL não têm filtro
-  de formato (são texto livre) — diferente de DATA/HORA, que têm — então,
-  em casos raros, um fragmento de texto impresso ainda pode ocupar a
-  coluna Responsável ou Motivo de uma linha isolada de rodapé sem nenhum
-  outro candidato competindo. Nunca foi observado gerar uma confirmação
-  falsa (o registro resultante continua sem matrícula), mas não está
-  totalmente eliminado. Uma migração para alinhamento de formulário +
-  regiões específicas por campo resolveria isso de forma mais definitiva,
-  mas foi deliberadamente adiada até medir o ganho das intervenções
-  menores primeiro.
+```text
+Esperado: 40 liberações
+Encontrado: 40 liberações
+
+40/40 = 100%
+```
+
+---
+
+## Validação com dados reais
+
+O sistema foi validado com um PDF real contendo cinco folhas.
+
+Resultado:
+
+| Página    | Liberações esperadas | Detectadas |
+| --------- | -------------------: | ---------: |
+| 1         |                    8 |          8 |
+| 2         |                    8 |          8 |
+| 3         |                    8 |          8 |
+| 4         |                    8 |          8 |
+| 5         |                    8 |          8 |
+| **Total** |               **40** |     **40** |
+
+A página 3 inicialmente apresentava apenas cinco registros devido a um problema no agrupamento espacial dos elementos OCR.
+
+O algoritmo de agrupamento foi corrigido e a página passou a detectar corretamente as oito liberações.
+
+Nenhum registro fantasma foi observado após a correção.
+
+---
+
+## Princípios do sistema
+
+### Nunca inventar dados
+
+O sistema deve preferir `REVISÃO` a uma correção sem evidência suficiente.
+
+### Não confundir OCR com verdade
+
+O texto reconhecido pelo OCR é apenas uma hipótese que precisa ser validada.
+
+### Não reconhecer informações desnecessárias
+
+Nome e Setor não são extraídos da folha.
+
+### Não interpretar texto residual como dado
+
+Depois que o gestor é identificado com segurança, texto adicional desconhecido não deve contaminar o campo Responsável.
+
+### Preservar a ordem da folha
+
+A sequência física das liberações é mantida.
+
+### Falhas devem ser recuperáveis
+
+Uma exceção não deve deixar a interface travada ou impedir o processamento restante.
+
+---
+
+## Limitações atuais
+
+* O OCR roda em CPU e é relativamente lento.
+* Caligrafia muito ilegível pode resultar em `REVISÃO`.
+* Uma matrícula parcialmente cortada ou ilegível pode não ser recuperada.
+* Gestores parcialmente cortados podem exigir revisão manual.
+* A qualidade da fotografia influencia diretamente o OCR.
+* O parser ainda trabalha com OCR da página inteira + geometria, sem ROIs fixas por campo.
+* O agrupamento espacial foi validado com um conjunto limitado de folhas reais e pode exigir novos ajustes caso surjam formulários ou condições de captura muito diferentes.
+
+### Qualidade da imagem
+
+As folhas reais podem apresentar diferentes níveis de iluminação e tonalidade, inclusive papel reciclado ou mais escuro.
+
+O pré-processamento atual utiliza:
+
+```text
+OpenCV
+↓
+grayscale
+↓
+redução de ruído
+↓
+CLAHE
+↓
+nitidez
+```
+
+Testes com folha de tonalidade escura não demonstraram vantagem consistente de abandonar o grayscale atual.
+
+Por isso, nenhuma alteração foi feita apenas para tentar acelerar ou modificar o pré-processamento sem evidência de ganho.
+
+---
+
+## Próximas fases
+
+O MVP atual está em fase de estabilização.
+
+A próxima grande etapa prevista é uma **reorganização arquitetural completa**, sem alteração do comportamento funcional.
+
+Objetivos futuros:
+
+```text
+MVP estável
+    ↓
+reorganização da arquitetura
+    ↓
+separação clara de responsabilidades
+    ↓
+estrutura de pastas mais limpa
+    ↓
+redução de acoplamento
+    ↓
+testes de regressão
+    ↓
+nova evolução funcional
+```
+
+A refatoração arquitetural deverá preservar os comportamentos já validados e manter a suíte de testes como mecanismo de proteção contra regressões.
