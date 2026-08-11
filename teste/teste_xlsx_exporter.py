@@ -3,10 +3,10 @@ import sys
 import shutil
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import openpyxl  # noqa: E402
-from xlsx_exporter import export_to_xlsx  # noqa: E402
+from leitor_matriculas.exportacao.xlsx_exporter import export_to_xlsx  # noqa: E402
 
 
 def _registro(status, matricula="28972", pagina=1, **extra):

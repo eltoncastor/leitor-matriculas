@@ -17,10 +17,10 @@ import shutil
 import tempfile
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pdf_reader  # noqa: E402
-from pdf_reader import contar_paginas, iterar_paginas, PaginaPdf  # noqa: E402
+from leitor_matriculas.ocr import pdf_reader  # noqa: E402
+from leitor_matriculas.ocr.pdf_reader import contar_paginas, iterar_paginas, PaginaPdf  # noqa: E402
 
 try:
     import pymupdf as fitz

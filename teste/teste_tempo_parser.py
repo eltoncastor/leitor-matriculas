@@ -12,9 +12,9 @@ import os
 import sys
 from datetime import date, datetime, time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from tempo_parser import (  # noqa: E402
+from leitor_matriculas.parsing.tempo_parser import (  # noqa: E402
     interpretar_data,
     interpretar_hora,
     interpretar_data_hora,

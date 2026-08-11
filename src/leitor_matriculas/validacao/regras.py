@@ -46,9 +46,16 @@ reconhecido erroneamente como "ELTON").
 import unicodedata
 from typing import Optional
 
-from correspondencia_aproximada import buscar_correspondencia, resolver_responsavel
-from registro_parser import Registro
-from tempo_parser import avaliar_hora_opcional, interpretar_hora, validar_data
+from leitor_matriculas.parsing.registro_parser import Registro
+from leitor_matriculas.parsing.tempo_parser import (
+    avaliar_hora_opcional,
+    interpretar_hora,
+    validar_data,
+)
+from leitor_matriculas.validacao.correspondencia_aproximada import (
+    buscar_correspondencia,
+    resolver_responsavel,
+)
 
 CONFIANCA_MINIMA_MATRICULA = 0.80
 

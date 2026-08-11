@@ -15,10 +15,10 @@ Usa PaddleOCR MOCKADO. Roda sob Xvfb (Linux/CI) ou display nativo
 (Windows).
 """
 import sys, time, threading, tempfile, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np, cv2
 from unittest.mock import patch, MagicMock
-from ui import App, _ler_imagem
+from leitor_matriculas.ui.app import App, _ler_imagem
 
 _tmp_dir = tempfile.mkdtemp()
 _caminho_img = os.path.join(_tmp_dir, 'teste_falha.jpg')
@@ -53,7 +53,7 @@ def _checar_ui_recuperada(app, m_err):
 # que _processar_uma_pagina nao blinda internamente).
 # ---------------------------------------------------------------------
 print("=== Caso 1: excecao generica escapando de _processar_uma_pagina ===")
-with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     with patch.object(App, '_processar_uma_pagina', side_effect=RuntimeError("falha simulada de inicializacao do OCR")):
@@ -71,11 +71,11 @@ with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showwarning
 # precisa capturar o resto.
 # ---------------------------------------------------------------------
 print("=== Caso 2: get_ocr_engine falha com excecao != ImportError ===")
-with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     app._ocr_engine = None  # força _processar_uma_pagina a tentar recriar o engine
-    with patch('ui.get_ocr_engine', side_effect=RuntimeError("modelo do PaddleOCR nao pode ser carregado")):
+    with patch('leitor_matriculas.ui.app.get_ocr_engine', side_effect=RuntimeError("modelo do PaddleOCR nao pode ser carregado")):
         _rodar_worker_imagem(app, imagem)
     _checar_ui_recuperada(app, m_err)
     print("OK: falha na criacao do engine (excecao nao-ImportError) nao trava a UI")
@@ -87,7 +87,7 @@ with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showwarning
 # correcao nao alterou o caminho feliz.
 # ---------------------------------------------------------------------
 print("=== Caso 3: fluxo normal (sem falha) continua igual ===")
-with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     fake_engine = MagicMock()

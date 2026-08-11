@@ -23,14 +23,18 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from image_processor import preprocess_image, to_display_rgb
-from ocr_engine import get_ocr_engine, normalizar_matricula
-from data_manager import DataManager
-from registro_parser import CampoOcr, parse_registros, verificar_contagem_posicoes
-from tempo_parser import tentar_separar_data_hora_mesclada
-from validacao import classificar_registro
-import pdf_reader
-import xlsx_exporter
+from leitor_matriculas.ocr.image_processor import preprocess_image, to_display_rgb
+from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
+from leitor_matriculas.dados.data_manager import DataManager
+from leitor_matriculas.parsing.registro_parser import (
+    CampoOcr,
+    parse_registros,
+    verificar_contagem_posicoes,
+)
+from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
+from leitor_matriculas.validacao.regras import classificar_registro
+from leitor_matriculas.ocr import pdf_reader
+from leitor_matriculas.exportacao import xlsx_exporter
 
 EXTENSOES_IMAGEM = [("Imagens", "*.jpg *.jpeg *.png *.webp"), ("Todos", "*.*")]
 EXTENSOES_PDF = [("PDF", "*.pdf")]

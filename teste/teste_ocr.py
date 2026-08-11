@@ -16,13 +16,13 @@ import os
 
 # Permite rodar "python teste\teste_ocr.py" a partir da raiz do projeto,
 # importando os módulos que estão na pasta principal (um nível acima).
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cv2
 import numpy as np
 
-from image_processor import preprocess_image
-from ocr_engine import get_ocr_engine, normalizar_matricula
+from leitor_matriculas.ocr.image_processor import preprocess_image
+from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
 
 
 def carregar_imagem(path: str) -> np.ndarray:

@@ -18,17 +18,17 @@ Uso:
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ocr_engine import OCRResult  # noqa: E402
-from registro_parser import (  # noqa: E402
+from leitor_matriculas.ocr.engine import OCRResult  # noqa: E402
+from leitor_matriculas.parsing.registro_parser import (  # noqa: E402
     CampoOcr,
     POSICOES_ESPERADAS_POR_FOLHA,
     parse_registros,
     verificar_contagem_posicoes,
 )
-from tempo_parser import tentar_separar_data_hora_mesclada  # noqa: E402
-from ui import _reparar_data_hora_mescladas  # noqa: E402
+from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada  # noqa: E402
+from leitor_matriculas.ui.app import _reparar_data_hora_mescladas  # noqa: E402
 
 
 def _r(texto, x1, y1, x2, y2, confianca=0.9):

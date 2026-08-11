@@ -11,13 +11,13 @@ Uso:
     python teste\\teste_ui_integracao.py                 (Windows)
 """
 import time, os, sys, tempfile, shutil
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np, cv2
 from unittest.mock import patch, MagicMock
 import pymupdf as fitz
 
-from ui import App, _ler_imagem
-from ocr_engine import OCRResult
+from leitor_matriculas.ui.app import App, _ler_imagem
+from leitor_matriculas.ocr.engine import OCRResult
 
 # --- fixtures: imagem sintética de teste ---
 # Usa tempfile em vez de um caminho POSIX fixo ("/tmp/...") -- em Windows
@@ -45,8 +45,8 @@ def linha(y1,y2,data,hora,nome,mat,setor,mot,gestor,conf_mat=0.9):
 resultados_ocr = cabecalho() + linha(40,60,"23.04.2026","11:05","Fulano","28972","TI","RH","Gestor X") \
                               + linha(70,90,"23.04.2026","11:10","Beltrano","99999","RH","ADM","Gestor Y", conf_mat=0.5)
 
-with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showinfo') as m_info, \
-     patch('ui.messagebox.showwarning') as m_warn:
+with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showinfo') as m_info, \
+     patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn:
     app = App()
     fake_engine = MagicMock()
     fake_engine.recognize.return_value = resultados_ocr
@@ -101,7 +101,7 @@ with patch('ui.messagebox.showerror') as m_err, patch('ui.messagebox.showinfo') 
 
     # -------- salvar XLSX --------
     saida_xlsx = os.path.join(tmp, 'saida.xlsx')
-    with patch('ui.filedialog.asksaveasfilename', return_value=saida_xlsx):
+    with patch('leitor_matriculas.ui.app.filedialog.asksaveasfilename', return_value=saida_xlsx):
         app._on_salvar()
     assert m_info.called
     assert os.path.isfile(saida_xlsx)

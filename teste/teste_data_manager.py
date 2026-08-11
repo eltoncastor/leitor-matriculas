@@ -24,9 +24,9 @@ import sys
 import shutil
 import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from data_manager import DataManager  # noqa: E402
+from leitor_matriculas.dados.data_manager import DataManager  # noqa: E402
 
 
 def parte_a_bases_reais():

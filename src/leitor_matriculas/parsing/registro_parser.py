@@ -61,7 +61,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from ocr_engine import OCRResult
+from leitor_matriculas.ocr.engine import OCRResult
 
 
 # ---------------------------------------------------------------------------

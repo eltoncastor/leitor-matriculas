@@ -109,52 +109,69 @@ Quando o gestor não puder ser identificado com segurança, o registro é enviad
 
 ## Arquitetura atual
 
+O código-fonte fica em `src/leitor_matriculas/`, organizado por **responsabilidade**:
+
 ```text
 leitor_matriculas/
-├── main.py
-├── ui.py
-├── ocr_engine.py
-├── image_processor.py
-├── pdf_reader.py
-├── registro_parser.py
-├── tempo_parser.py
-├── data_manager.py
-├── correspondencia_aproximada.py
-├── validacao.py
-├── xlsx_exporter.py
-├── exporter.py
+├── main.py                     ponto de entrada (python main.py)
 │
-├── dados/
+├── src/
+│   └── leitor_matriculas/
+│       ├── ocr/                entrada visual
+│       │   ├── image_processor.py
+│       │   ├── engine.py
+│       │   └── pdf_reader.py
+│       ├── parsing/            reconstrução dos registros
+│       │   ├── registro_parser.py
+│       │   └── tempo_parser.py
+│       ├── validacao/          classificação dos registros
+│       │   ├── regras.py
+│       │   └── correspondencia_aproximada.py
+│       ├── dados/              bases XLSX de apoio
+│       │   └── data_manager.py
+│       ├── exportacao/         geração da saída
+│       │   ├── xlsx_exporter.py
+│       │   └── csv_exporter.py
+│       └── ui/                 interface Tkinter
+│           └── app.py
+│
+├── dados/                      bases reais (locais, fora do Git)
 │   ├── LEIA-ME.txt
 │   ├── Colaboradores.xlsx
 │   ├── Gestores.xlsx
 │   └── Motivos.xlsx
 │
+├── entrada/                    fotos/PDFs reais (locais, fora do Git)
+├── saida/                      planilhas geradas (locais, fora do Git)
 ├── teste/
 ├── requirements.txt
 └── README.md
 ```
 
-> A estrutura atual ainda será reorganizada em uma futura fase de refatoração arquitetural. Essa reorganização deverá preservar o comportamento e os testes existentes.
+A dependência é de mão única — `ocr → parsing → validacao → exportacao`, com `ui` por cima de todos. Nenhum módulo de baixo importa um de cima, o que mantém o grafo acíclico.
+
+O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acrescenta `src/` ao `sys.path` antes de importar o pacote.
 
 ---
 
 ## Principais módulos
 
-| Arquivo                         | Responsabilidade                                         |
-| ------------------------------- | -------------------------------------------------------- |
-| `main.py`                       | Ponto de entrada                                         |
-| `ui.py`                         | Interface gráfica Tkinter e coordenação do processamento |
-| `ocr_engine.py`                 | Inicialização e execução do PaddleOCR                    |
-| `image_processor.py`            | Pré-processamento das imagens                            |
-| `pdf_reader.py`                 | Renderização de PDFs página por página                   |
-| `registro_parser.py`            | Agrupamento espacial dos elementos OCR em registros      |
-| `tempo_parser.py`               | Interpretação e validação de Data/Hora                   |
-| `data_manager.py`               | Carregamento das bases XLSX                              |
-| `correspondencia_aproximada.py` | Correspondência aproximada controlada                    |
-| `validacao.py`                  | Classificação dos registros                              |
-| `xlsx_exporter.py`              | Geração da planilha XLSX                                 |
-| `exporter.py`                   | Exportação CSV legada                                    |
+| Módulo                                            | Responsabilidade                                         |
+| ------------------------------------------------- | -------------------------------------------------------- |
+| `main.py`                                          | Ponto de entrada                                         |
+| `ui/app.py`                                        | Interface gráfica Tkinter e coordenação do processamento |
+| `ocr/engine.py`                                    | Inicialização e execução do PaddleOCR                    |
+| `ocr/image_processor.py`                           | Pré-processamento das imagens                            |
+| `ocr/pdf_reader.py`                                | Renderização de PDFs página por página                   |
+| `parsing/registro_parser.py`                       | Agrupamento espacial dos elementos OCR em registros      |
+| `parsing/tempo_parser.py`                          | Interpretação e validação de Data/Hora                   |
+| `dados/data_manager.py`                            | Carregamento das bases XLSX                              |
+| `validacao/correspondencia_aproximada.py`          | Correspondência aproximada controlada                    |
+| `validacao/regras.py`                              | Classificação dos registros                              |
+| `exportacao/xlsx_exporter.py`                      | Geração da planilha XLSX                                 |
+| `exportacao/csv_exporter.py`                       | Exportação CSV legada (não ligada à interface)           |
+
+Os caminhos acima são relativos a `src/leitor_matriculas/`.
 
 ---
 

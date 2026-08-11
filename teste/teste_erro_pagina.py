@@ -6,11 +6,11 @@ lote (as demais paginas continuam sendo processadas), e do botao Limpar.
 Usa PaddleOCR MOCKADO. Roda sob Xvfb.
 """
 import sys, time, threading, tempfile, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import pymupdf as fitz
 from unittest.mock import patch, MagicMock
-from ui import App
-from ocr_engine import OCRResult
+from leitor_matriculas.ui.app import App
+from leitor_matriculas.ocr.engine import OCRResult
 
 tmp = tempfile.mkdtemp()
 caminho = os.path.join(tmp, 'mes.pdf')
@@ -25,7 +25,7 @@ def get_pixmap_falha_pagina2(self, *a, **kw):
         raise RuntimeError("falha simulada")
     return original_get_pixmap(self, *a, **kw)
 
-with patch('ui.messagebox.showerror'), patch('ui.messagebox.showwarning') as m_warn:
+with patch('leitor_matriculas.ui.app.messagebox.showerror'), patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn:
     app = App()
     fake = MagicMock()
     fake.recognize.return_value = []

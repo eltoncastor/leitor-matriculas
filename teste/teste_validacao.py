@@ -1,11 +1,11 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from registro_parser import Registro, CampoOcr  # noqa: E402
-from validacao import classificar_registro  # noqa: E402
-from data_manager import DataManager  # noqa: E402
+from leitor_matriculas.parsing.registro_parser import Registro, CampoOcr  # noqa: E402
+from leitor_matriculas.validacao.regras import classificar_registro  # noqa: E402
+from leitor_matriculas.dados.data_manager import DataManager  # noqa: E402
 
 
 class _DMFalso:

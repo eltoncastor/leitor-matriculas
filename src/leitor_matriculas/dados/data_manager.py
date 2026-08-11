@@ -283,8 +283,16 @@ class DataManager:
     """
 
     def __init__(self, pasta_dados: Optional[str] = None):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.pasta_dados = pasta_dados or os.path.join(base_dir, "dados")
+        # A pasta `dados/` com os XLSX reais fica na RAIZ do projeto, não
+        # dentro do pacote. Este arquivo está em
+        #     <raiz>/src/leitor_matriculas/dados/data_manager.py
+        # logo a raiz são três níveis acima (dados -> leitor_matriculas ->
+        # src -> raiz). Cuidado ao mover este módulo: o caminho depende da
+        # profundidade dele dentro do pacote.
+        raiz_projeto = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+        )
+        self.pasta_dados = pasta_dados or os.path.join(raiz_projeto, "dados")
 
         self.colaboradores: Dict[str, dict] = {}
         self.motivos: List[str] = []

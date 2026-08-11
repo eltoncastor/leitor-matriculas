@@ -13,9 +13,9 @@ Uso:
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from correspondencia_aproximada import buscar_correspondencia, resolver_responsavel  # noqa: E402
+from leitor_matriculas.validacao.correspondencia_aproximada import buscar_correspondencia, resolver_responsavel  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
