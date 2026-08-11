@@ -3,12 +3,12 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Virtual environments
+# Ambientes virtuais
 .venv/
 venv/
 env/
 
-# Test/cache
+# Testes / cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -27,3 +27,122 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Resultados gerados
+saida/*
+!saida/.gitkeep
+
+# Arquivos de teste locais
+exemplos/
+teste.jpg
+teste - Copy.jpg
+resultado_ocr.csv
+estrutura.txt
+
+# Entradas reais
+entrada/*
+!entrada/.gitkeep
+
+# Dados reais
+dados/*.xlsx
+
+# Configuração local do Claude
+.claude/settings.local.json# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Testes / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Arquivos temporários
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Resultados gerados
+saida/*
+!saida/.gitkeep
+
+# Arquivos de teste locais
+exemplos/
+teste.jpg
+teste - Copy.jpg
+resultado_ocr.csv
+estrutura.txt
+
+# Entradas reais
+entrada/*
+!entrada/.gitkeep
+
+# Dados reais
+dados/*.xlsx
+
+# Configuração local do Claude
+.claude/settings.local.json# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Testes / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Arquivos temporários
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Resultados gerados
+saida/*
+!saida/.gitkeep
+
+# Arquivos de teste locais
+exemplos/
+teste.jpg
+teste - Copy.jpg
+resultado_ocr.csv
+estrutura.txt
+
+# Entradas reais
+entrada/*
+!entrada/.gitkeep
+
+# Dados reais
+dados/*.xlsx
+
+# Configuração local do Claude
+.claude/settings.local.json
