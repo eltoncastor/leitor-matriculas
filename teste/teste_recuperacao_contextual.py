@@ -54,10 +54,10 @@ from leitor_matriculas.validacao.regras import classificar_registro  # noqa: E40
 # real de dados/Motivos.xlsx).
 MOTIVOS = ["HORÁRIO NEGADO", "RH", "ADM", "ARMÁRIOS", "FOLGA FIXA",
            "ESQUECEU CRACHÁ", "TREINAMENTO"]
-GESTORES = ["GR1 – JADSON", "GR3 - DIANA", "GR4 - ANDRÉ VALENÇA", "GR5 - DIEGO",
-            "GRL - FABIANA", "ADELINO", "ANDERSON ABREU", "ANDERSON CARLOS", "BRUNO",
-            "CARLOS", "DANIEL", "EDVALDO", "NAYSHA", "PATRICK",
-            "GR1", "GR3", "GR4", "GR5", "GRL", "ABREU", "A. ABREU", "ANDERSON"]
+GESTORES = ["GR1 – TEODORO", "GR3 - BEATRIZ", "GR4 - RENATO GUIMARÃES", "GR5 - OTAVIO",
+            "GRL - LUCIA", "ROBERTO", "MARCELO TORRES", "MARCELO SOUZA", "HELIO",
+            "SOUZA", "MARTIM", "NORBERTO", "TAMIRES", "VICENTE",
+            "GR1", "GR3", "GR4", "GR5", "GRL", "TORRES", "M. TORRES", "MARCELO"]
 
 COLABORADOR = {"matricula": "19547", "nome": "FULANO DE TAL",
                "cargo": "ATENDENTE", "setor": "VENDAS"}
@@ -175,18 +175,18 @@ def teste_motivo_sem_evidencia_continua_revisao():
 
 def teste_gestor_codigo_gr():
     print("=== GESTOR: código GR prevalece sobre o texto secundário ===")
-    for texto, esperado in [("GR3", "GR3 - DIANA"),
-                            ("GR5", "GR5 - DIEGO"),
-                            ("6R05", "GR5 - DIEGO"),
-                            ("6R5", "GR5 - DIEGO"),
-                            ("GRS", "GR5 - DIEGO"),
-                            ("GR5 - Loemone", "GR5 - DIEGO"),
-                            ("GR5 - Esleane", "GR5 - DIEGO"),
-                            ("GR5 - Eosee", "GR5 - DIEGO"),
-                            ("GRS- Loemone", "GR5 - DIEGO"),
-                            ("GRS - Eose", "GR5 - DIEGO"),
-                            ("GR3 - Eslionm", "GR3 - DIANA"),
-                            ("GR4 - Greane", "GR4 - ANDRÉ VALENÇA")]:
+    for texto, esperado in [("GR3", "GR3 - BEATRIZ"),
+                            ("GR5", "GR5 - OTAVIO"),
+                            ("6R05", "GR5 - OTAVIO"),
+                            ("6R5", "GR5 - OTAVIO"),
+                            ("GRS", "GR5 - OTAVIO"),
+                            ("GR5 - Lorenne", "GR5 - OTAVIO"),
+                            ("GR5 - Lorena", "GR5 - OTAVIO"),
+                            ("GR5 - Eosee", "GR5 - OTAVIO"),
+                            ("GRS- Lorenne", "GR5 - OTAVIO"),
+                            ("GRS - Eose", "GR5 - OTAVIO"),
+                            ("GR3 - Lorenom", "GR3 - BEATRIZ"),
+                            ("GR4 - Greane", "GR4 - RENATO GUIMARÃES")]:
         r = resolver_responsavel(texto, GESTORES)
         checar(r.gestor_confirmado == esperado,
                f"{texto!r} -> {esperado!r} (obtido: {r.gestor_confirmado!r}, {r.status})")
@@ -197,9 +197,9 @@ def teste_gestor_identificacao_mais_especifica_ganha():
     print("=== GESTOR: a maior sequência confiável continua ganhando do código nu ===")
     # O código nunca pode atropelar uma identificação MAIS específica que
     # bate exatamente com a base.
-    r = resolver_responsavel("GR3 - DIANA - ESLEANE", GESTORES)
-    checar(r.status == "EXATA" and r.gestor_confirmado == "GR3 - DIANA",
-           f"'GR3 - DIANA - ESLEANE' -> EXATA/'GR3 - DIANA' (obtido: {r.status}/{r.gestor_confirmado!r})")
+    r = resolver_responsavel("GR3 - BEATRIZ - LORENA", GESTORES)
+    checar(r.status == "EXATA" and r.gestor_confirmado == "GR3 - BEATRIZ",
+           f"'GR3 - BEATRIZ - LORENA' -> EXATA/'GR3 - BEATRIZ' (obtido: {r.status}/{r.gestor_confirmado!r})")
     print()
 
 
@@ -434,7 +434,7 @@ def teste_normalizacao_nao_confirma_sozinha():
     # Gestor identificado + matrícula ausente -> REVISAO.
     r = classificar_registro(_registro(matricula="", gestor="GR5"), None, dm,
                              contexto_lote=contexto)
-    checar(r.status == "REVISAO" and r.gestor_confirmado == "GR5 - DIEGO",
+    checar(r.status == "REVISAO" and r.gestor_confirmado == "GR5 - OTAVIO",
            f"gestor identificado + matrícula ausente -> REVISAO (obtido: {r.status})")
 
     # Todos os campos seguros -> CONFIRMADO (e a saída já normalizada).
@@ -442,7 +442,7 @@ def teste_normalizacao_nao_confirma_sozinha():
                              COLABORADOR, dm, contexto_lote=contexto)
     checar(r.status == "CONFIRMADO", f"todos os campos seguros -> CONFIRMADO (obtido: {r.status} -- {r.observacao})")
     checar(r.data_confirmada == "23/04/26" and r.motivo_confirmado == MOTIVO_HORARIO_NEGADO
-           and r.gestor_confirmado == "GR5 - DIEGO",
+           and r.gestor_confirmado == "GR5 - OTAVIO",
            f"saída normalizada (obtido: {r.data_confirmada!r}/{r.motivo_confirmado!r}/{r.gestor_confirmado!r})")
     checar("23.04" in r.observacao,
            "a Observação registra o texto original e o ano completado por contexto")

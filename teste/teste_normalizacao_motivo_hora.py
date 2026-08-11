@@ -7,7 +7,7 @@ Ajuste pontual de normalização, virado em teste de regressão:
                   para HORÁRIO NEGADO quando o OCR veio corrompido, SEM
                   puxar para lá motivos de outra natureza.
     2. GESTOR  -- código nu ("GR3", "GR5", "6R05") expandido para a
-                  identificação completa cadastrada ("GR3 - DIANA").
+                  identificação completa cadastrada ("GR3 - BEATRIZ").
     3. HORA    -- formato canônico HH:MM, mantendo a recusa de hora
                   impossível.
     4. Ponta a ponta em `classificar_registro`: formato de saída, texto da
@@ -41,10 +41,10 @@ from leitor_matriculas.validacao.regras import classificar_registro  # noqa: E40
 MOTIVOS = [" Horário negado         ", " RH                     ", " ADM                    ",
            " Armários               ", " Folga fixa             ",
            " Esquecimento de crachá ", "TREINAMENTO", "NEGADA", "NEGADO", "H. NEGADO"]
-GESTORES = ["GR1 – JADSON", "GR3 - DIANA", "GR4 - ANDRÉ VALENÇA", "GR5 - DIEGO",
-            "GRL - FABIANA", "ADELINO", "ANDERSON ABREU", "ANDERSON CARLOS", "BRUNO",
-            "CARLOS", "DANIEL", "EDVALDO", "NAYSHA", "PATRICK",
-            "GR1", "GR3", "GR4", "GR5", "GRL", "ABREU", "A. ABREU", "ANDERSON "]
+GESTORES = ["GR1 – TEODORO", "GR3 - BEATRIZ", "GR4 - RENATO GUIMARÃES", "GR5 - OTAVIO",
+            "GRL - LUCIA", "ROBERTO", "MARCELO TORRES", "MARCELO SOUZA", "HELIO",
+            "SOUZA", "MARTIM", "NORBERTO", "TAMIRES", "VICENTE",
+            "GR1", "GR3", "GR4", "GR5", "GRL", "TORRES", "M. TORRES", "MARCELO "]
 
 # Leituras corrompidas do motivo observadas nas folhas reais.
 MOTIVO_CORROMPIDO = ["Hiv. Nigado", "H.v. vigaolb", "Negoide", "Negade", "NEGAND",
@@ -84,7 +84,7 @@ class _DMFalso:
 COLABORADOR = {"matricula": "19547", "nome": "FULANO", "cargo": "OPERADOR", "setor": "LOJA"}
 
 
-def _registro(motivo="Horário negado", gestor="GR5 - DIEGO", hora="11:05",
+def _registro(motivo="Horário negado", gestor="GR5 - OTAVIO", hora="11:05",
               data="23.04.26", matricula="19547"):
     campos = {}
     if data:
@@ -168,10 +168,10 @@ def teste_fallback_exige_o_canonico_na_base():
 
 def teste_codigo_gr_expande_para_nome_completo():
     print("=== GESTOR: código nu expandido para o nome cadastrado ===")
-    for bruto, esperado in [("GR3", "GR3 - DIANA"), ("GR5", "GR5 - DIEGO"),
-                            ("GR4", "GR4 - ANDRÉ VALENÇA"), ("GRL", "GRL - FABIANA"),
-                            ("GR1", "GR1 – JADSON"), ("6R05", "GR5 - DIEGO"),
-                            ("6R5", "GR5 - DIEGO")]:
+    for bruto, esperado in [("GR3", "GR3 - BEATRIZ"), ("GR5", "GR5 - OTAVIO"),
+                            ("GR4", "GR4 - RENATO GUIMARÃES"), ("GRL", "GRL - LUCIA"),
+                            ("GR1", "GR1 – TEODORO"), ("6R05", "GR5 - OTAVIO"),
+                            ("6R5", "GR5 - OTAVIO")]:
         r = resolver_responsavel(bruto, GESTORES)
         checar(r.gestor_confirmado == esperado,
                f"{bruto!r} -> {esperado!r} (obtido: {r.gestor_confirmado!r}, status={r.status})")
@@ -179,12 +179,12 @@ def teste_codigo_gr_expande_para_nome_completo():
 
 
 def teste_nome_da_auxiliar_nao_contamina_o_responsavel():
-    print("=== GESTOR: nome da auxiliar descartado (GR5 + Loemone/Esleane) ===")
-    for bruto in ["GR5 - Eosee", "GR5 - Loemone", "GR5 - Esleane", "GR5- Esleane"]:
+    print("=== GESTOR: nome da auxiliar descartado (GR5 + Lorenne/Lorena) ===")
+    for bruto in ["GR5 - Eosee", "GR5 - Lorenne", "GR5 - Lorena", "GR5- Lorena"]:
         r = resolver_responsavel(bruto, GESTORES)
-        checar(r.gestor_confirmado == "GR5 - DIEGO",
-               f"{bruto!r} -> 'GR5 - DIEGO' (obtido: {r.gestor_confirmado!r})")
-        for residuo in ("Eosee", "Loemone", "Esleane"):
+        checar(r.gestor_confirmado == "GR5 - OTAVIO",
+               f"{bruto!r} -> 'GR5 - OTAVIO' (obtido: {r.gestor_confirmado!r})")
+        for residuo in ("Eosee", "Lorenne", "Lorena"):
             checar(residuo not in (r.gestor_confirmado or ""),
                    f"{bruto!r}: {residuo!r} não aparece no responsável")
     print()
@@ -192,9 +192,9 @@ def teste_nome_da_auxiliar_nao_contamina_o_responsavel():
 
 def teste_gestor_sem_expansao_unica_nao_e_chutado():
     print("=== GESTOR: sem expansão única, nada é chutado ===")
-    r = resolver_responsavel("ANDERSON", GESTORES)
-    checar((r.gestor_confirmado or "").strip() == "ANDERSON",
-           f"'ANDERSON' (duas expansões possíveis) não vira ABREU nem CARLOS "
+    r = resolver_responsavel("MARCELO", GESTORES)
+    checar((r.gestor_confirmado or "").strip() == "MARCELO",
+           f"'MARCELO' (duas expansões possíveis) não vira TORRES nem SOUZA "
            f"(obtido: {r.gestor_confirmado!r})")
     # "GRI": o I pode ser tanto o dígito 1 quanto a letra L, e GR1 e GRL
     # existem OS DOIS na base -- duas leituras plausíveis, nenhuma escolha.
@@ -258,7 +258,7 @@ def teste_ponta_a_ponta_saida_normalizada():
     checar(r.hora_confirmada == "18:59", f"hora '18:59' (obtido: {r.hora_confirmada!r})")
     checar(r.motivo_confirmado == MOTIVO_HORARIO_NEGADO,
            f"motivo {MOTIVO_HORARIO_NEGADO!r} (obtido: {r.motivo_confirmado!r})")
-    checar(r.gestor_confirmado == "GR5 - DIEGO", f"gestor 'GR5 - DIEGO' (obtido: {r.gestor_confirmado!r})")
+    checar(r.gestor_confirmado == "GR5 - OTAVIO", f"gestor 'GR5 - OTAVIO' (obtido: {r.gestor_confirmado!r})")
     checar("motivo normalizado para HORÁRIO NEGADO a partir do OCR: 'Hiv. Nigado'" in r.observacao,
            f"Observação registra o fallback (obtido: {r.observacao!r})")
     print()
@@ -324,13 +324,13 @@ def teste_motivo_e_gestor_normalizados_mesmo_em_revisao_por_outro_campo():
     dm = _DMFalso(colaboradores={"19547": COLABORADOR})
 
     cenarios = [
-        ("data ilegível", _registro(data="23.04", motivo="H.v. Nigado", gestor="GR5 - Loemone"), COLABORADOR),
+        ("data ilegível", _registro(data="23.04", motivo="H.v. Nigado", gestor="GR5 - Lorenne"), COLABORADOR),
         ("data ausente", _registro(data=None, motivo="Negade", gestor="6R05"), COLABORADOR),
         ("sem matrícula", _registro(matricula=None, motivo="NoGAAO", gestor="GR3"), None),
         ("matrícula fora da base", _registro(matricula="99999", motivo="Hev. Nigadb", gestor="GR5"), None),
     ]
-    esperado_gestor = {"GR5 - Loemone": "GR5 - DIEGO", "6R05": "GR5 - DIEGO",
-                       "GR3": "GR3 - DIANA", "GR5": "GR5 - DIEGO"}
+    esperado_gestor = {"GR5 - Lorenne": "GR5 - OTAVIO", "6R05": "GR5 - OTAVIO",
+                       "GR3": "GR3 - BEATRIZ", "GR5": "GR5 - OTAVIO"}
     for rotulo, registro, colaborador in cenarios:
         r = classificar_registro(registro, colaborador, dm)
         bruto_motivo = registro.campos["motivo"].texto

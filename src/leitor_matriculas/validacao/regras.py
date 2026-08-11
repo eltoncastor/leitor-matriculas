@@ -51,12 +51,13 @@ Observação.
 
 RESPONSÁVEL: usa `resolver_responsavel` (correspondencia_aproximada.py),
 que também lida com o caso opcional em que um Auxiliar de Prevenção de
-Perdas anota o próprio nome junto ao gestor (ex.: "GR3 - DIANA - ESLEANE")
+Perdas anota o próprio nome junto ao gestor (ex.: "GR3 - BEATRIZ - LORENA")
 — esse texto residual é descartado (nunca contamina a identificação do
 gestor), mas o nome do auxiliar em si não é reconhecido nem faz parte do
 resultado: não é usado na planilha final, e tentar corrigi-lo por
-aproximação se mostrou arriscado em nomes curtos (ex.: "Eslon"
-reconhecido erroneamente como "ELTON").
+aproximação se mostrou arriscado em nomes curtos (o nome curto de um
+auxiliar sai parecido demais com o de um gestor cadastrado e acaba sendo
+"corrigido" para ele — ex.: um "Marto" manuscrito virando "MARTIM").
 """
 
 import unicodedata

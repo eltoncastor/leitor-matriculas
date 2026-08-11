@@ -28,8 +28,8 @@ from leitor_matriculas.validacao.correspondencia_aproximada import (  # noqa: E4
 
 # Bases sintéticas com o MESMO formato das reais.
 GESTORES = ["GR1", "GR3", "GR4", "GR5", "GRL",
-            "GR3 - DIANA", "GR4 - ANDRÉ VALENÇA", "GR5 - DIEGO", "GRL - FABIANA",
-            "DANIEL", "NAYSHA", "ANDERSON ABREU", "ANDERSON CARLOS"]
+            "GR3 - BEATRIZ", "GR4 - RENATO GUIMARÃES", "GR5 - OTAVIO", "GRL - LUCIA",
+            "MARTIM", "TAMIRES", "MARCELO TORRES", "MARCELO SOUZA"]
 MOTIVOS = ["Horário negado", "RH", "ADM", "Armários", "Folga fixa",
            "Esquecimento de crachá", "TREINAMENTO", "NEGADA", "NEGADO", "H. NEGADO"]
 # "19547" existe e "19544" não -> é isso que autoriza o "+"->7 em "1954+".
@@ -151,31 +151,31 @@ def teste_matricula_vazia_nunca_e_inventada():
 
 def teste_gestor_codigo_tem_prioridade_sobre_ruido():
     print("=== GESTOR: código identificado apesar do ruído da auxiliar ===")
-    for bruto in ["GR5 - Esleane", "GR5 - Eosee", "GR5 - Loemone", "GR5- Esleane", "GR5 - XYZ"]:
+    for bruto in ["GR5 - Lorena", "GR5 - Eosee", "GR5 - Lorenne", "GR5- Lorena", "GR5 - XYZ"]:
         r = resolver_responsavel(bruto, GESTORES)
-        checar(r.gestor_confirmado == "GR5 - DIEGO",
-               f"{bruto!r} -> 'GR5 - DIEGO' (obtido: {r.gestor_confirmado!r}, status={r.status})")
+        checar(r.gestor_confirmado == "GR5 - OTAVIO",
+               f"{bruto!r} -> 'GR5 - OTAVIO' (obtido: {r.gestor_confirmado!r}, status={r.status})")
     print()
 
 
 def teste_gestor_usa_nome_oficial_da_base():
     print("=== GESTOR: nome oficial vem da base, nunca o da auxiliar ===")
-    r = resolver_responsavel("GR3 - Eslean", GESTORES)
-    checar(r.gestor_confirmado == "GR3 - DIANA",
-           f"'GR3 - Eslean' -> 'GR3 - DIANA' (obtido: {r.gestor_confirmado!r})")
-    checar("Eslean" not in (r.gestor_confirmado or ""), "nome da auxiliar não contamina o gestor")
+    r = resolver_responsavel("GR3 - Loren", GESTORES)
+    checar(r.gestor_confirmado == "GR3 - BEATRIZ",
+           f"'GR3 - Loren' -> 'GR3 - BEATRIZ' (obtido: {r.gestor_confirmado!r})")
+    checar("Loren" not in (r.gestor_confirmado or ""), "nome da auxiliar não contamina o gestor")
     r2 = resolver_responsavel("GRL - Coseeone", GESTORES)
-    checar(r2.gestor_confirmado == "GRL - FABIANA",
-           f"'GRL - Coseeone' -> 'GRL - FABIANA' (obtido: {r2.gestor_confirmado!r})")
+    checar(r2.gestor_confirmado == "GRL - LUCIA",
+           f"'GRL - Coseeone' -> 'GRL - LUCIA' (obtido: {r2.gestor_confirmado!r})")
     print()
 
 
 def teste_gestor_ambiguo_continua_em_revisao():
     print("=== GESTOR: código sem expansão única não é chutado ===")
-    # "ANDERSON" tem DUAS expansões possíveis na base -> não expande.
-    r = resolver_responsavel("ANDERSON", GESTORES)
-    checar(r.gestor_confirmado == "ANDERSON" or r.status not in ("EXATA", "APROXIMADA"),
-           f"'ANDERSON' não vira ABREU nem CARLOS por chute (obtido: {r.gestor_confirmado!r})")
+    # "MARCELO" tem DUAS expansões possíveis na base -> não expande.
+    r = resolver_responsavel("MARCELO", GESTORES)
+    checar(r.gestor_confirmado == "MARCELO" or r.status not in ("EXATA", "APROXIMADA"),
+           f"'MARCELO' não vira TORRES nem SOUZA por chute (obtido: {r.gestor_confirmado!r})")
     r2 = resolver_responsavel("ZZZZZZ", GESTORES)
     checar(r2.gestor_confirmado is None, f"texto sem correspondência -> None (obtido: {r2.gestor_confirmado!r})")
     print()

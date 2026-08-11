@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 # Separador gestor/auxiliar: hífen com espaço opcional dos dois lados --
-# o OCR real produz tanto "GR3 - Eslon" quanto "GR4- Cosecone" (sem espaço
+# o OCR real produz tanto "GR3 - Loreno" quanto "GR4- Cosecone" (sem espaço
 # antes do hífen), então o corte não pode depender de " - " literal.
 _RE_SEPARADOR_AUXILIAR = re.compile(r"\s*-\s*")
 
@@ -433,17 +433,19 @@ def resolver_motivo(
 #
 # O campo RESPONSÁVEL às vezes tem um Auxiliar de Prevenção de Perdas
 # anotado junto ao gestor, para registrar quem estava na portaria (ex.:
-# "GR3 - DIANA - ESLEANE"). O nome do auxiliar NÃO é usado em lugar
+# "GR3 - BEATRIZ - LORENA"). O nome do auxiliar NÃO é usado em lugar
 # nenhum do resultado final (não faz parte da planilha) -- por isso este
 # módulo não tenta mais reconhecê-lo/corrigi-lo (ver histórico: essa
-# tentativa criava risco real de reconhecimento errado em nomes curtos,
-# ex. "Eslon" -> "ELTON"). O que importa é só NÃO deixar esse texto extra
+# tentativa criava risco real de reconhecimento errado em nomes curtos:
+# o nome CURTO de um auxiliar sai parecido demais com o nome de um gestor
+# cadastrado e é "corrigido" para ele -- ex. um "Marto" manuscrito virando
+# o gestor "MARTIM"). O que importa é só NÃO deixar esse texto extra
 # contaminar a identificação do GESTOR -- por isso a lógica de separar um
 # possível texto residual depois do gestor continua existindo, só que o
 # texto em si é descartado, não devolvido nem processado.
 #
-# Hífen NÃO significa separação automática: "GR3 - DIANA" e
-# "GR4 - ANDRÉ VALENÇA" são identificações ÚNICAS de gestor (existem assim,
+# Hífen NÃO significa separação automática: "GR3 - BEATRIZ" e
+# "GR4 - RENATO GUIMARÃES" são identificações ÚNICAS de gestor (existem assim,
 # inteiras, na base). Só depois de tentar o texto INTEIRO contra a base é
 # que um prefixo (cortado no separador) é tentado -- e a MAIOR sequência
 # confiável sempre ganha (prefixo mais longo primeiro). O prefixo pode
@@ -451,7 +453,7 @@ def resolver_motivo(
 # curto) -- a mesma checagem de limiar/ambiguidade de `buscar_correspondencia`
 # já protege contra um chute errado. Quando o prefixo aceito é só um
 # código/alias curto (ex.: "GRL") e existe, na base, uma identificação MAIS
-# ESPECÍFICA que começa com esse código (ex.: "GRL - FABIANA"), essa versão
+# ESPECÍFICA que começa com esse código (ex.: "GRL - LUCIA"), essa versão
 # mais específica é usada como gestor_confirmado -- mas só quando não há
 # ambiguidade (só uma expansão possível); com duas ou mais, o código
 # sozinho não é aceito como confirmação suficiente.
@@ -473,13 +475,13 @@ def _expandir_para_entrada_mais_especifica(gestor: str, candidatos: List[str]) -
     """
     Se `gestor` for um código/alias curto (ex.: "GRL") e existir, entre os
     candidatos, uma identificação MAIS ESPECÍFICA que começa com esse
-    código seguido de um separador não-alfanumérico (ex.: "GRL - FABIANA"),
+    código seguido de um separador não-alfanumérico (ex.: "GRL - LUCIA"),
     devolve essa versão mais específica.
 
     Devolve None (não expande -- mantém o código como está) quando não há
     nenhuma expansão mais específica, OU quando há mais de uma (ambíguo
-    demais para escolher sozinho: "ANDERSON" -> "ANDERSON ABREU" /
-    "ANDERSON CARLOS" não expande, o código sozinho fica como está). Nunca
+    demais para escolher sozinho: "MARCELO" -> "MARCELO TORRES" /
+    "MARCELO SOUZA" não expande, o código sozinho fica como está). Nunca
     inventa: só escolhe entre o que já existe na base.
     """
     gestor_norm = _normalizar(gestor)
@@ -568,7 +570,7 @@ def _com_expansao(gestor: Optional[str], candidatos: List[str]) -> Optional[str]
     exatamente uma. Aplicado a TODOS os caminhos de aceitação de
     `resolver_responsavel` -- um código de gestor lido sozinho ("GR5", ou
     "6R05" corrigido para "GR5") tem de sair na planilha como a
-    identificação completa cadastrada ("GR5 - DIEGO"), venha ele de um
+    identificação completa cadastrada ("GR5 - OTAVIO"), venha ele de um
     match exato, aproximado ou de um prefixo."""
     if not gestor:
         return gestor
@@ -587,7 +589,7 @@ def resolver_responsavel(
     (SEM_CORRESPONDENCIA/AMBIGUA), preservando o texto original.
 
     Se houver texto residual depois do gestor (ex.: um auxiliar de
-    portaria anotado junto, "GR3 - DIANA - ESLEANE"), esse texto é usado
+    portaria anotado junto, "GR3 - BEATRIZ - LORENA"), esse texto é usado
     só para NÃO contaminar a identificação do gestor -- é descartado, não
     reconhecido nem devolvido (o resultado final não usa o nome do
     auxiliar).
@@ -600,7 +602,7 @@ def resolver_responsavel(
 
     # Um match EXATO do texto INTEIRO já é a melhor confirmação possível --
     # nada de mais específico pode existir, então nem tenta separar um
-    # texto residual (ex.: "GR3 - DIANA" não deve virar gestor="GR3" nunca).
+    # texto residual (ex.: "GR3 - BEATRIZ" não deve virar gestor="GR3" nunca).
     if resultado_completo.status == "EXATA":
         gestor_confirmado = _com_expansao(resultado_completo.valor_sugerido, candidatos_gestores)
         return ResultadoResponsavel(
@@ -608,7 +610,7 @@ def resolver_responsavel(
             gestor_confirmado=gestor_confirmado,
             status="EXATA",
             similaridade=resultado_completo.similaridade,
-            # Expandir "GR5" -> "GR5 - DIEGO" É uma normalização do campo
+            # Expandir "GR5" -> "GR5 - OTAVIO" É uma normalização do campo
             # (o texto sai da planilha diferente do que o OCR leu), então
             # a Observação precisa registrar isso.
             houve_normalizacao=_normalizar(gestor_confirmado) != _normalizar(texto_ocr),
@@ -621,7 +623,7 @@ def resolver_responsavel(
     # (nunca em espaço simples: nome composto não é gestor+residual).
     partes = [p.strip() for p in _RE_SEPARADOR_AUXILIAR.split(str(texto_ocr)) if p.strip()]
     if len(partes) >= 2:
-        # Prefixos do mais longo para o mais curto -- "GR3 - DIANA" (mais
+        # Prefixos do mais longo para o mais curto -- "GR3 - BEATRIZ" (mais
         # específico) sempre tem prioridade sobre "GR3" sozinho. Aceita o
         # PRIMEIRO prefixo que resolver com confiança (exato OU
         # aproximado -- buscar_correspondencia já barra ambiguidade/baixa
@@ -648,7 +650,7 @@ def resolver_responsavel(
     # código está legível, ele identifica o gestor sozinho, e o que vier
     # depois dele (nome de auxiliar de portaria, rabisco, lixo) não muda
     # mais nada. Vem DEPOIS das tentativas acima de propósito -- elas
-    # podem achar a identificação MAIS ESPECÍFICA ("GR3 - DIANA" inteira,
+    # podem achar a identificação MAIS ESPECÍFICA ("GR3 - BEATRIZ" inteira,
     # em vez do código "GR3" sozinho), e a maior sequência confiável
     # sempre ganha -- e ANTES da correspondência aproximada do texto
     # inteiro, que é justamente a que se perde quando o lixo depois do

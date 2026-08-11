@@ -143,10 +143,10 @@ def teste_gestor_erro_de_caractere():
 
 
 def teste_gestor_candidato_ambiguo():
-    candidatos = ["ANDERSON ABREU", "ANDERSON CARLOS"]
-    r = buscar_correspondencia("ANDERSON", candidatos)
+    candidatos = ["MARCELO TORRES", "MARCELO SOUZA"]
+    r = buscar_correspondencia("MARCELO", candidatos)
     assert r.status == "AMBIGUA" and r.valor_sugerido is None, r
-    print("OK: 'ANDERSON' sozinho, com dois sobrenomes parecidos na base -> AMBIGUA (REVISAO)")
+    print("OK: 'MARCELO' sozinho, com dois sobrenomes parecidos na base -> AMBIGUA (REVISAO)")
 
 
 def teste_gestor_candidato_insuficiente():
@@ -165,7 +165,7 @@ def teste_gestor_base_vazia():
 # RESPONSÁVEL (resolver_responsavel)
 #
 # O nome do Auxiliar de Prevenção de Perdas, quando anotado junto ao
-# gestor (ex.: "GR3 - DIANA - ESLEANE"), NÃO é reconhecido nem faz parte
+# gestor (ex.: "GR3 - BEATRIZ - LORENA"), NÃO é reconhecido nem faz parte
 # do resultado -- não é usado na planilha final. O texto residual depois
 # do gestor só é usado internamente para não contaminar a identificação
 # do GESTOR; o valor em si é descartado (ver correspondencia_aproximada.py).
@@ -174,119 +174,120 @@ def teste_gestor_base_vazia():
 # Base real de Gestores.xlsx (nomes compostos, códigos "GRx - NOME",
 # códigos sozinhos e possíveis aliases -- ver correspondencia_aproximada.py).
 GESTORES_REAIS = [
-    "GR1 - JADSON", "GR3 - DIANA", "GR4 - ANDRÉ VALENÇA", "GR5 - DIEGO", "GRL - FABIANA",
-    "ADELINO", "ANDERSON ABREU", "ANDERSON CARLOS", "BRUNO", "CARLOS", "DANIEL", "EDVALDO",
-    "NAYSHA", "PATRICK", "GR1", "GR3", "GR4", "GR5", "GRL", "ABREU", "A ABREU", "ANDERSON",
+    "GR1 - TEODORO", "GR3 - BEATRIZ", "GR4 - RENATO GUIMARÃES", "GR5 - OTAVIO", "GRL - LUCIA",
+    "ROBERTO", "MARCELO TORRES", "MARCELO SOUZA", "HELIO", "SOUZA", "MARTIM", "NORBERTO",
+    "TAMIRES", "VICENTE", "GR1", "GR3", "GR4", "GR5", "GRL", "TORRES", "M TORRES", "MARCELO",
 ]
 
 
 def teste_responsavel_codigo_nome_e_identificacao_unica():
-    # Hífen NÃO separa gestor/texto residual por padrão -- "GR3 - DIANA" é
+    # Hífen NÃO separa gestor/texto residual por padrão -- "GR3 - BEATRIZ" é
     # uma identificação única e existe assim, inteira, na base.
-    r = resolver_responsavel("GR3 - DIANA", GESTORES_REAIS)
-    assert r.status == "EXATA" and r.gestor_confirmado == "GR3 - DIANA", r
-    print("OK: 'GR3 - DIANA' -> gestor único, sem dividir por hífen")
+    r = resolver_responsavel("GR3 - BEATRIZ", GESTORES_REAIS)
+    assert r.status == "EXATA" and r.gestor_confirmado == "GR3 - BEATRIZ", r
+    print("OK: 'GR3 - BEATRIZ' -> gestor único, sem dividir por hífen")
 
 
 def teste_responsavel_codigo_nome_composto():
-    r = resolver_responsavel("GR4 - ANDRÉ VALENÇA", GESTORES_REAIS)
-    assert r.status == "EXATA" and r.gestor_confirmado == "GR4 - ANDRÉ VALENÇA", r
-    print("OK: 'GR4 - ANDRÉ VALENÇA' -> gestor único (nome composto preservado)")
+    r = resolver_responsavel("GR4 - RENATO GUIMARÃES", GESTORES_REAIS)
+    assert r.status == "EXATA" and r.gestor_confirmado == "GR4 - RENATO GUIMARÃES", r
+    print("OK: 'GR4 - RENATO GUIMARÃES' -> gestor único (nome composto preservado)")
 
 
 def teste_responsavel_nome_composto_sem_codigo():
-    r1 = resolver_responsavel("ANDERSON ABREU", GESTORES_REAIS)
-    assert r1.status == "EXATA" and r1.gestor_confirmado == "ANDERSON ABREU", r1
-    r2 = resolver_responsavel("ANDERSON CARLOS", GESTORES_REAIS)
-    assert r2.status == "EXATA" and r2.gestor_confirmado == "ANDERSON CARLOS", r2
-    print("OK: 'ANDERSON ABREU'/'ANDERSON CARLOS' -> nomes compostos não divididos por espaço")
+    r1 = resolver_responsavel("MARCELO TORRES", GESTORES_REAIS)
+    assert r1.status == "EXATA" and r1.gestor_confirmado == "MARCELO TORRES", r1
+    r2 = resolver_responsavel("MARCELO SOUZA", GESTORES_REAIS)
+    assert r2.status == "EXATA" and r2.gestor_confirmado == "MARCELO SOUZA", r2
+    print("OK: 'MARCELO TORRES'/'MARCELO SOUZA' -> nomes compostos não divididos por espaço")
 
 
 def teste_responsavel_alias_curto():
-    r = resolver_responsavel("ABREU", GESTORES_REAIS)
-    assert r.status == "EXATA" and r.gestor_confirmado == "ABREU", r
-    print("OK: 'ABREU' -> reconhece o alias curto exatamente como está na base")
+    r = resolver_responsavel("TORRES", GESTORES_REAIS)
+    assert r.status == "EXATA" and r.gestor_confirmado == "TORRES", r
+    print("OK: 'TORRES' -> reconhece o alias curto exatamente como está na base")
 
 
 def teste_responsavel_alias_com_erro_de_ocr():
-    r = resolver_responsavel("A. ABREU", GESTORES_REAIS)
-    assert r.status == "APROXIMADA" and r.gestor_confirmado == "A ABREU", r
-    print("OK: 'A. ABREU' -> aproximado de 'A ABREU' (ponto do OCR não confunde com 'ABREU')")
+    r = resolver_responsavel("M. TORRES", GESTORES_REAIS)
+    assert r.status == "APROXIMADA" and r.gestor_confirmado == "M TORRES", r
+    print("OK: 'M. TORRES' -> aproximado de 'M TORRES' (ponto do OCR não confunde com 'TORRES')")
 
 
 def teste_responsavel_com_texto_residual_codigo_nome():
-    # "GR3 - DIANA - ESLEANE": o gestor é identificado normalmente; o
-    # texto depois dele ("ESLEANE") é só descartado, não aparece no
+    # "GR3 - BEATRIZ - LORENA": o gestor é identificado normalmente; o
+    # texto depois dele ("LORENA") é só descartado, não aparece no
     # resultado.
-    r = resolver_responsavel("GR3 - DIANA - ESLEANE", GESTORES_REAIS)
+    r = resolver_responsavel("GR3 - BEATRIZ - LORENA", GESTORES_REAIS)
     assert r.status == "EXATA", r
-    assert r.gestor_confirmado == "GR3 - DIANA", r
-    print("OK: 'GR3 - DIANA - ESLEANE' -> gestor='GR3 - DIANA' (texto residual descartado, não aparece no resultado)")
+    assert r.gestor_confirmado == "GR3 - BEATRIZ", r
+    print("OK: 'GR3 - BEATRIZ - LORENA' -> gestor='GR3 - BEATRIZ' (texto residual descartado, não aparece no resultado)")
 
 
 def teste_responsavel_com_texto_residual_nome_composto():
-    r = resolver_responsavel("ANDERSON ABREU - ESLEANE", GESTORES_REAIS)
+    r = resolver_responsavel("MARCELO TORRES - LORENA", GESTORES_REAIS)
     assert r.status == "EXATA", r
-    assert r.gestor_confirmado == "ANDERSON ABREU", r
-    print("OK: 'ANDERSON ABREU - ESLEANE' -> gestor='ANDERSON ABREU' (texto residual descartado)")
+    assert r.gestor_confirmado == "MARCELO TORRES", r
+    print("OK: 'MARCELO TORRES - LORENA' -> gestor='MARCELO TORRES' (texto residual descartado)")
 
 
 def teste_responsavel_ambiguo_entre_dois_andersons():
-    # Sem o alias "ANDERSON" sozinho na base (cenário onde só existem os
-    # dois nomes completos), "ANDERSON" sozinho é genuinamente ambíguo --
-    # nunca escolhe entre "ANDERSON ABREU" e "ANDERSON CARLOS" no chute.
-    gestores_sem_alias = [g for g in GESTORES_REAIS if g != "ANDERSON"]
-    r = resolver_responsavel("ANDERSON", gestores_sem_alias)
+    # Sem o alias "MARCELO" sozinho na base (cenário onde só existem os
+    # dois nomes completos), "MARCELO" sozinho é genuinamente ambíguo --
+    # nunca escolhe entre "MARCELO TORRES" e "MARCELO SOUZA" no chute.
+    gestores_sem_alias = [g for g in GESTORES_REAIS if g != "MARCELO"]
+    r = resolver_responsavel("MARCELO", gestores_sem_alias)
     assert r.status == "AMBIGUA" and r.gestor_confirmado is None, r
-    print("OK: 'ANDERSON' sem alias inequívoco, com dois nomes completos parecidos -> AMBIGUA (REVISAO)")
+    print("OK: 'MARCELO' sem alias inequívoco, com dois nomes completos parecidos -> AMBIGUA (REVISAO)")
 
 
 def teste_responsavel_erro_de_ocr_corrigivel():
-    r = resolver_responsavel("ANDERSOM ABREU", GESTORES_REAIS)  # "M" no lugar de "N"
-    assert r.status == "APROXIMADA" and r.gestor_confirmado == "ANDERSON ABREU", r
-    print("OK: 'ANDERSOM ABREU' (erro de OCR) -> corrigido para 'ANDERSON ABREU'")
+    r = resolver_responsavel("MARCELO TORNES", GESTORES_REAIS)  # "M" no lugar de "N"
+    assert r.status == "APROXIMADA" and r.gestor_confirmado == "MARCELO TORRES", r
+    print("OK: 'MARCELO TORNES' (erro de OCR) -> corrigido para 'MARCELO TORRES'")
 
 
 def teste_responsavel_ocr_degradado_com_codigo_e_nome_curto():
-    # Achado real (teste.jpg): o OCR real produziu "GR3 - Eslon" e
-    # "Daniel - coseeone" -- o texto inteiro não bate com confiança
+    # Achado real (teste.jpg): o OCR real produziu "GR3 - Loreno" e
+    # "Martim - coseeone" -- o texto inteiro não bate com confiança
     # suficiente, mas o PREFIXO (código/nome já cadastrado sozinho na
     # base) bate; como "GR3" tem uma única expansão mais específica na
-    # base ("GR3 - DIANA"), o gestor confirmado já vem na forma completa.
-    # O restante ("Eslon"/"coseeone") é só descartado -- não faz parte do
+    # base ("GR3 - BEATRIZ"), o gestor confirmado já vem na forma completa.
+    # O restante ("Loreno"/"coseeone") é só descartado -- não faz parte do
     # resultado.
-    r1 = resolver_responsavel("GR3 - Eslon", GESTORES_REAIS)
-    assert r1.gestor_confirmado == "GR3 - DIANA", r1
+    r1 = resolver_responsavel("GR3 - Loreno", GESTORES_REAIS)
+    assert r1.gestor_confirmado == "GR3 - BEATRIZ", r1
 
-    # "DANIEL" já é a forma mais completa (não é um código com expansão) --
+    # "MARTIM" já é a forma mais completa (não é um código com expansão) --
     # fica como está.
-    r2 = resolver_responsavel("Daniel - coseeone", GESTORES_REAIS)
-    assert r2.status == "EXATA" and r2.gestor_confirmado == "DANIEL", r2
-    print("OK: 'GR3 - Eslon'/'Daniel - coseeone' -> gestor identificado corretamente, texto residual descartado")
+    r2 = resolver_responsavel("Martim - coseeone", GESTORES_REAIS)
+    assert r2.status == "EXATA" and r2.gestor_confirmado == "MARTIM", r2
+    print("OK: 'GR3 - Loreno'/'Martim - coseeone' -> gestor identificado corretamente, texto residual descartado")
 
 
 def teste_responsavel_hifen_sem_espaco_antes():
     # Achado real (teste.jpg): o OCR às vezes produz "GR4- Cosecone" (sem
     # espaço antes do hífen) -- o corte não pode depender de " - " literal.
     r = resolver_responsavel("GR4- Cosecone", GESTORES_REAIS)
-    assert r.gestor_confirmado == "GR4 - ANDRÉ VALENÇA", r
-    print("OK: 'GR4- Cosecone' (sem espaço antes do hífen) -> gestor='GR4 - ANDRÉ VALENÇA'")
+    assert r.gestor_confirmado == "GR4 - RENATO GUIMARÃES", r
+    print("OK: 'GR4- Cosecone' (sem espaço antes do hífen) -> gestor='GR4 - RENATO GUIMARÃES'")
 
 
 def teste_responsavel_gkl_codione_gestor_identificado_auxiliar_descartado():
     # CASO REAL (teste.jpg): "Gkl - Codione" -- "Gkl" é erro de OCR de
-    # "GRL" (código da gestora FABIANA); "Codione" seria o auxiliar de
+    # "GRL" (código da gestora LUCIA); "Codione" seria o auxiliar de
     # portaria, mas o nome do auxiliar não faz mais parte do resultado
     # (simplificação: eliminamos essa tentativa de reconhecimento, que
-    # tinha risco real de erro -- ver histórico desta conversa: "Eslon"
-    # sendo reconhecido incorretamente como "ELTON").
+    # tinha risco real de erro -- o nome curto de um auxiliar sai parecido
+    # demais com o de um gestor cadastrado e acaba sendo "corrigido" para
+    # ele, ex.: um "Marto" manuscrito virando "MARTIM").
     r = resolver_responsavel("Gkl - Codione", GESTORES_REAIS)
 
     # A parte que importa continua funcionando: "Gkl" reconhece "GRL" por
     # aproximação controlada (erro de OCR num código curto) e expande para
-    # a identificação completa e inequívoca "GRL - FABIANA".
-    assert r.gestor_confirmado == "GRL - FABIANA", r
-    print("OK: 'Gkl - Codione' -> gestor='GRL - FABIANA' (auxiliar não é mais reconhecido nem faz parte do resultado)")
+    # a identificação completa e inequívoca "GRL - LUCIA".
+    assert r.gestor_confirmado == "GRL - LUCIA", r
+    print("OK: 'Gkl - Codione' -> gestor='GRL - LUCIA' (auxiliar não é mais reconhecido nem faz parte do resultado)")
 
 
 def teste_responsavel_nao_inventa_sem_correspondencia():
@@ -296,7 +297,7 @@ def teste_responsavel_nao_inventa_sem_correspondencia():
 
 
 def teste_responsavel_base_vazia():
-    r = resolver_responsavel("GR3 - DIANA - ESLEANE", [])
+    r = resolver_responsavel("GR3 - BEATRIZ - LORENA", [])
     assert r.status == "SEM_CANDIDATOS" and r.gestor_confirmado is None
     print("OK: base de gestores vazia -> SEM_CANDIDATOS, comportamento seguro")
 
@@ -305,17 +306,17 @@ def teste_responsavel_sem_texto_residual_e_normal_e_valido():
     # A AUSÊNCIA de texto residual (só o gestor, sem nada depois) é o caso
     # mais comum -- registro totalmente válido, sem nenhum tratamento
     # especial.
-    r1 = resolver_responsavel("GR3 - DIANA", GESTORES_REAIS)
-    assert r1.status == "EXATA" and r1.gestor_confirmado == "GR3 - DIANA", r1
-    r2 = resolver_responsavel("ANDERSON ABREU", GESTORES_REAIS)
-    assert r2.status == "EXATA" and r2.gestor_confirmado == "ANDERSON ABREU", r2
-    print("OK: 'GR3 - DIANA'/'ANDERSON ABREU' sem nada depois -> registro válido")
+    r1 = resolver_responsavel("GR3 - BEATRIZ", GESTORES_REAIS)
+    assert r1.status == "EXATA" and r1.gestor_confirmado == "GR3 - BEATRIZ", r1
+    r2 = resolver_responsavel("MARCELO TORRES", GESTORES_REAIS)
+    assert r2.status == "EXATA" and r2.gestor_confirmado == "MARCELO TORRES", r2
+    print("OK: 'GR3 - BEATRIZ'/'MARCELO TORRES' sem nada depois -> registro válido")
 
 
 def teste_responsavel_resultado_nao_tem_mais_campo_de_auxiliar():
     # Simplificação: ResultadoResponsavel não expõe mais nome de auxiliar
     # nenhum -- confirma que o campo realmente não existe mais no objeto.
-    r = resolver_responsavel("GR3 - DIANA - ESLEANE", GESTORES_REAIS)
+    r = resolver_responsavel("GR3 - BEATRIZ - LORENA", GESTORES_REAIS)
     assert not hasattr(r, "auxiliar_portaria"), r
     print("OK: ResultadoResponsavel não tem mais campo de auxiliar (eliminado do resultado)")
 
