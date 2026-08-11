@@ -44,8 +44,23 @@ import re
 from datetime import date, datetime, time
 from typing import Optional
 
+# Separadores aceitos entre dia/mês/ano. O ":" entra aqui porque é um erro
+# de OCR REAL e recorrente nas folhas ("14.04:26"): o ponto da data sai
+# lido como dois-pontos. Aceitar o separador não afrouxa nada -- os três
+# números continuam tendo de formar uma data de calendário válida.
+_SEP_DATA = r"[./\-:]"
+
 _RE_DATA = re.compile(
-    r"^\s*(\d{1,2})\s*[./\-]\s*(\d{1,2})\s*[./\-]\s*(\d{2}|\d{4})\s*$"
+    rf"^\s*(\d{{1,2}})\s*{_SEP_DATA}\s*(\d{{1,2}})\s*{_SEP_DATA}\s*(\d{{2}}|\d{{4}})\s*$"
+)
+
+# Caso real: o OCR perde o separador entre MÊS e ANO e cola os dois
+# ("23.0426" = 23/04/26). A leitura é inequívoca porque o bloco colado só
+# pode ser mês(2) + ano(2 ou 4) -- nenhum dígito é inventado, só se
+# reconhece onde o separador sumiu. Continua passando pela mesma validação
+# de calendário depois.
+_RE_DATA_MES_ANO_COLADOS = re.compile(
+    rf"^\s*(\d{{1,2}})\s*{_SEP_DATA}\s*(\d{{2}})(\d{{2}}|\d{{4}})\s*$"
 )
 _RE_HORA = re.compile(
     r"^\s*(\d{1,2})\s*[:hH.]\s*(\d{2})\s*(?:[:mM.]\s*(\d{2}))?\s*$"
@@ -69,7 +84,8 @@ def interpretar_data(texto: Optional[str]) -> Optional[date]:
     if not texto or not texto.strip():
         return None
 
-    correspondencia = _RE_DATA.match(texto.strip())
+    texto = texto.strip()
+    correspondencia = _RE_DATA.match(texto) or _RE_DATA_MES_ANO_COLADOS.match(texto)
     if not correspondencia:
         return None
 
@@ -82,6 +98,26 @@ def interpretar_data(texto: Optional[str]) -> Optional[date]:
         return date(ano, mes, dia)
     except ValueError:
         return None  # data impossível (ex.: 31/04, mês 13, dia 32...)
+
+
+def formatar_data_dd_mm_aa(data: date) -> str:
+    """Formato canônico de saída da DATA na planilha: `dd/mm/aa`."""
+    return f"{data.day:02d}/{data.month:02d}/{data.year % 100:02d}"
+
+
+def normalizar_data(texto: Optional[str]) -> Optional[str]:
+    """
+    Devolve a DATA já no formato canônico `dd/mm/aa`, ou None quando o
+    texto não puder ser interpretado com segurança.
+
+    Isto NÃO afrouxa nada: é `interpretar_data` (mesma validação estrita
+    de calendário, mesma recusa a data sem ano) seguida da formatação
+    canônica. Serve para que a planilha final tenha sempre um formato
+    único de data, em vez do texto cru do OCR com o separador que ele
+    tiver lido ("14.04.26", "14-04-26", "14.04:26" -> todos "14/04/26").
+    """
+    data = interpretar_data(texto)
+    return formatar_data_dd_mm_aa(data) if data is not None else None
 
 
 def interpretar_hora(texto: Optional[str]) -> Optional[time]:

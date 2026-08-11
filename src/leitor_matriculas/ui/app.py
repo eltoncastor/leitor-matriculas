@@ -34,6 +34,7 @@ from leitor_matriculas.parsing.registro_parser import (
 )
 from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
 from leitor_matriculas.validacao.regras import classificar_registro
+from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
 from leitor_matriculas.ocr import pdf_reader
 from leitor_matriculas.exportacao import xlsx_exporter
 
@@ -133,6 +134,7 @@ class App(tk.Tk):
         self._registros_exportacao = []  # lista de dicts prontos p/ xlsx_exporter
         self._erros_paginas = []
         self._avisos_contagem = []  # PROBLEMA 2: páginas cuja contagem de posições divergiu do esperado
+        self._avisos_descarte = []  # linhas sem matrícula identificável (nunca descartadas em silêncio)
         self._contador_confirmados = 0
         self._contador_revisao = 0
         self._paginas_processadas = 0
@@ -181,6 +183,10 @@ class App(tk.Tk):
             bases, text="Avisos de contagem (0)", command=self._mostrar_avisos_contagem, state="disabled"
         )
         self.btn_avisos_contagem.pack(side="left", padx=8)
+        self.btn_avisos_descarte = ttk.Button(
+            bases, text="Linhas sem matrícula (0)", command=self._mostrar_avisos_descarte, state="disabled"
+        )
+        self.btn_avisos_descarte.pack(side="left", padx=8)
 
         frame_imgs = ttk.Frame(self, padding=10)
         frame_imgs.pack(side="top", fill="x")
@@ -517,13 +523,29 @@ class App(tk.Tk):
         for registro in registros:
             campo_matricula = registro.campos.get("matricula")
             texto_matricula = campo_matricula.texto if campo_matricula else ""
+            # Primeiro as confusões já conhecidas (O->0, I->1, S->5, B->8,
+            # só quando o texto já parece matrícula), depois a recuperação
+            # contextual dos caracteres que sobraram (ex.: "+" -> 7), que
+            # usa a base de colaboradores como evidência.
             matricula_normalizada = normalizar_matricula(texto_matricula) if texto_matricula else ""
+            resultado_matricula = resolver_matricula(
+                matricula_normalizada,
+                existe_na_base=(
+                    (lambda m: self._data_manager.buscar_colaborador(m) is not None)
+                    if self._data_manager.colaboradores_disponivel else None
+                ),
+            )
+            if resultado_matricula.matricula:
+                matricula_normalizada = resultado_matricula.matricula
 
             colaborador = None
-            if registro.completo:
+            if registro.completo and resultado_matricula.status != "AMBIGUA":
                 colaborador = self._data_manager.buscar_colaborador(matricula_normalizada)
 
-            resultado_classificacao = classificar_registro(registro, colaborador, self._data_manager)
+            resultado_classificacao = classificar_registro(
+                registro, colaborador, self._data_manager,
+                resultado_matricula=resultado_matricula,
+            )
             status, observacao = resultado_classificacao.status, resultado_classificacao.observacao
             if status == "CONFIRMADO":
                 self._contador_confirmados += 1
@@ -533,7 +555,11 @@ class App(tk.Tk):
             nome = colaborador["nome"] if colaborador else NAO_ENCONTRADO
             cargo = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
             setor = colaborador["setor"] if colaborador else NAO_ENCONTRADO
-            data_ = _texto_campo(registro, "data")
+            # DATA sai sempre no formato canônico dd/mm/aa quando pôde ser
+            # interpretada com segurança; quando não pôde, o registro já
+            # está em REVISAO e o texto cru do OCR é mantido de propósito,
+            # para o operador ver exatamente o que foi lido.
+            data_ = resultado_classificacao.data_confirmada or _texto_campo(registro, "data")
             # HORA é campo OPCIONAL: só vai para a tabela/planilha quando
             # pôde ser interpretada com segurança. Ausente ou ilegível, sai
             # VAZIA -- nunca com o texto ilegível do OCR, que seria
@@ -552,6 +578,24 @@ class App(tk.Tk):
 
             conf_matricula = campo_matricula.confianca if campo_matricula else None
             conf_str = f"{conf_matricula * 100:.0f}%" if conf_matricula is not None else "N/D"
+
+            # Aviso explícito de linha sem matrícula identificável. O
+            # registro NÃO é descartado (vai para REVISAO com o que tem --
+            # perder uma liberação real seria pior), mas o operador
+            # precisa saber que ela existe e por quê: é a linha que ele
+            # terá de conferir no papel.
+            if not resultado_matricula.matricula:
+                self._avisos_descarte.append({
+                    "pagina": numero_pagina,
+                    "mensagem": (
+                        f"linha sem matrícula identificável"
+                        + (f" (OCR leu: '{texto_matricula}')" if texto_matricula else " (coluna vazia)")
+                        + " -- mantida em REVISÃO, nenhuma matrícula foi inventada"
+                    ),
+                })
+                self.btn_avisos_descarte.config(
+                    text=f"Linhas sem matrícula ({len(self._avisos_descarte)})", state="normal"
+                )
 
             rotulo_status = self._rotulo_status(status, observacao)
 
@@ -605,6 +649,12 @@ class App(tk.Tk):
         msg = "\n\n".join(f"Página {a['pagina']}: {a['mensagem']}" for a in self._avisos_contagem)
         messagebox.showwarning("Avisos de contagem de posições", msg)
 
+    def _mostrar_avisos_descarte(self):
+        if not self._avisos_descarte:
+            return
+        msg = "\n\n".join(f"Página {a['pagina']}: {a['mensagem']}" for a in self._avisos_descarte)
+        messagebox.showwarning("Linhas sem matrícula identificável", msg)
+
     def _on_limpar(self):
         if self._processando:
             return
@@ -612,6 +662,7 @@ class App(tk.Tk):
         self._registros_exportacao = []
         self._erros_paginas = []
         self._avisos_contagem = []
+        self._avisos_descarte = []
         self._contador_confirmados = 0
         self._contador_revisao = 0
         self._paginas_processadas = 0
@@ -623,6 +674,7 @@ class App(tk.Tk):
         self.btn_revisao.config(text="Abrir revisão (0)", state="disabled")
         self.btn_erros_pag.config(text="Erros de página (0)", state="disabled")
         self.btn_avisos_contagem.config(text="Avisos de contagem (0)", state="disabled")
+        self.btn_avisos_descarte.config(text="Linhas sem matrícula (0)", state="disabled")
         self.lbl_status.config(text="Resultados limpos. Nenhum arquivo selecionado.")
 
     @staticmethod

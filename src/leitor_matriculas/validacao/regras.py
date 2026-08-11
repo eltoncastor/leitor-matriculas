@@ -50,6 +50,7 @@ from leitor_matriculas.parsing.registro_parser import Registro
 from leitor_matriculas.parsing.tempo_parser import (
     avaliar_hora_opcional,
     interpretar_hora,
+    normalizar_data,
     validar_data,
 )
 from leitor_matriculas.validacao.correspondencia_aproximada import (
@@ -84,14 +85,22 @@ class ResultadoValidacao(tuple):
     o texto da hora quando ela pôde ser interpretada com segurança, e None
     quando está ausente ou ilegível — nesse caso quem exporta deixa a
     célula VAZIA em vez de escrever o texto ilegível do OCR.
+
+    `.data_confirmada` é a DATA já no formato canônico `dd/mm/aa`, ou None
+    quando não pôde ser interpretada com segurança (aí o registro já vai
+    para REVISAO de qualquer forma). `.matricula_confirmada` é a matrícula
+    só com dígitos depois da recuperação contextual, ou None quando não
+    houve recuperação a aplicar.
     """
 
     def __new__(cls, status, observacao, motivo_confirmado=None, gestor_confirmado=None,
-                hora_confirmada=None):
+                hora_confirmada=None, data_confirmada=None, matricula_confirmada=None):
         obj = super().__new__(cls, (status, observacao))
         obj.motivo_confirmado = motivo_confirmado
         obj.gestor_confirmado = gestor_confirmado
         obj.hora_confirmada = hora_confirmada
+        obj.data_confirmada = data_confirmada
+        obj.matricula_confirmada = matricula_confirmada
         return obj
 
     @property
@@ -143,8 +152,19 @@ def classificar_registro(
     registro: Registro,
     colaborador: Optional[dict],
     data_manager,
+    resultado_matricula=None,
 ) -> ResultadoValidacao:
-    """Devolve um ResultadoValidacao; status in {"CONFIRMADO","REVISAO"}."""
+    """
+    Devolve um ResultadoValidacao; status in {"CONFIRMADO","REVISAO"}.
+
+    `resultado_matricula` (opcional) é o `ResultadoMatricula` da
+    recuperação contextual da matrícula (ver
+    `validacao/recuperacao_matricula.py`), quando quem chama já a
+    executou para poder consultar a base. É opcional de propósito: sem
+    ele, o comportamento é exatamente o anterior — o parâmetro só
+    acrescenta o bloqueio por ambiguidade e a nota de recuperação na
+    observação.
+    """
     # HORA é opcional e NUNCA bloqueia: é avaliada primeiro, uma única vez,
     # e o resultado acompanha TODOS os retornos abaixo -- inclusive os de
     # REVISAO por outro motivo. Assim uma hora legítima nunca é perdida só
@@ -154,33 +174,60 @@ def classificar_registro(
     hora_confirmada = texto_hora if interpretar_hora(texto_hora) is not None else None
     aviso_hora = avaliar_hora_opcional(texto_hora)
 
+    # DATA canônica (dd/mm/aa) -- calculada uma vez e devolvida em todos os
+    # retornos, pelo mesmo motivo da hora: se a data é legível, a planilha
+    # deve mostrá-la normalizada mesmo num registro que foi para REVISAO
+    # por causa de outro campo.
+    campo_data = registro.campos.get("data")
+    texto_data = campo_data.texto if campo_data else ""
+    data_confirmada = normalizar_data(texto_data)
+
+    matricula_confirmada = None
+    if resultado_matricula is not None and resultado_matricula.matricula:
+        matricula_confirmada = resultado_matricula.matricula
+
+    def _resultado(status, observacao, **extras):
+        extras.setdefault("hora_confirmada", hora_confirmada)
+        extras.setdefault("data_confirmada", data_confirmada)
+        extras.setdefault("matricula_confirmada", matricula_confirmada)
+        return ResultadoValidacao(status, observacao, **extras)
+
     if not registro.completo:
-        return ResultadoValidacao(
-            "REVISAO", "matrícula não identificada pelo OCR", hora_confirmada=hora_confirmada
-        )
+        return _resultado("REVISAO", "matrícula não identificada pelo OCR")
 
     # DATA é obrigatória: esta continua sendo uma checagem bloqueante.
-    campo_data = registro.campos.get("data")
-    erro_data = validar_data(campo_data.texto if campo_data else "")
+    erro_data = validar_data(texto_data)
     if erro_data:
-        return ResultadoValidacao("REVISAO", erro_data, hora_confirmada=hora_confirmada)
+        return _resultado("REVISAO", erro_data)
 
     campo_matricula = registro.campos["matricula"]
 
-    if colaborador is None:
-        if data_manager.colaboradores_disponivel:
-            return ResultadoValidacao(
-                "REVISAO", "matrícula não encontrada na base de colaboradores",
-                hora_confirmada=hora_confirmada,
-            )
-        return ResultadoValidacao(
-            "REVISAO", "base de colaboradores indisponível", hora_confirmada=hora_confirmada
+    # Recuperação contextual da matrícula: quando duas leituras plausíveis
+    # existem DE VERDADE na base, são duas pessoas possíveis -- escolher
+    # uma seria exatamente o "CONFIRMADO incorreto" que o sistema evita.
+    if resultado_matricula is not None and resultado_matricula.status == "AMBIGUA":
+        candidatos = ", ".join(resultado_matricula.candidatos or [])
+        return _resultado(
+            "REVISAO",
+            f"matrícula '{resultado_matricula.texto_original}' ambígua -- "
+            f"mais de uma leitura existe na base ({candidatos})",
         )
 
+    if resultado_matricula is not None and resultado_matricula.status == "IRRECUPERAVEL":
+        return _resultado(
+            "REVISAO",
+            f"matrícula '{resultado_matricula.texto_original}' não pôde ser "
+            f"convertida com segurança para dígitos",
+        )
+
+    if colaborador is None:
+        if data_manager.colaboradores_disponivel:
+            return _resultado("REVISAO", "matrícula não encontrada na base de colaboradores")
+        return _resultado("REVISAO", "base de colaboradores indisponível")
+
     if campo_matricula.confianca is not None and campo_matricula.confianca < CONFIANCA_MINIMA_MATRICULA:
-        return ResultadoValidacao(
-            "REVISAO", f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)",
-            hora_confirmada=hora_confirmada,
+        return _resultado(
+            "REVISAO", f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
         )
 
     # Gestor e motivo são resolvidos de forma INDEPENDENTE um do outro (cada
@@ -192,6 +239,14 @@ def classificar_registro(
     # documenta na Observação por que a célula Hora saiu em branco, sem
     # jamais derrubar o registro para REVISAO.
     avisos = [aviso_hora] if aviso_hora else []
+    # Recuperação da matrícula aceita (ex.: "+" lido como 7, confirmado
+    # por existir só essa leitura na base) fica registrada na Observação
+    # -- o operador precisa poder ver que aquele número foi corrigido.
+    if resultado_matricula is not None and resultado_matricula.houve_recuperacao:
+        avisos.append(
+            f"matrícula recuperada: '{resultado_matricula.texto_original}' -> "
+            f"'{resultado_matricula.matricula}' (confirmada na base de colaboradores)"
+        )
     erros = []
 
     gestor_confirmado = None
@@ -225,12 +280,12 @@ def classificar_registro(
             avisos.append(aviso)
 
     if erros:
-        return ResultadoValidacao(
+        return _resultado(
             "REVISAO", "; ".join(erros), motivo_confirmado=motivo_confirmado,
-            gestor_confirmado=gestor_confirmado, hora_confirmada=hora_confirmada,
+            gestor_confirmado=gestor_confirmado,
         )
 
-    return ResultadoValidacao(
+    return _resultado(
         "CONFIRMADO", "; ".join(avisos), motivo_confirmado=motivo_confirmado,
-        gestor_confirmado=gestor_confirmado, hora_confirmada=hora_confirmada,
+        gestor_confirmado=gestor_confirmado,
     )
