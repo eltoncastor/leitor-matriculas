@@ -1,18 +1,46 @@
-Coloque aqui os três arquivos reais (ainda não fornecidos ao Claude):
+Bases de dados locais
 
-    Colaboradores.xlsx
-    Motivos.xlsx
-    Gestores.xlsx
+Coloque nesta pasta os arquivos XLSX utilizados pelo sistema:
 
-O programa lê esses arquivos automaticamente ao abrir (via data_manager.py).
-Nenhum dado de exemplo foi colocado aqui de propósito — o DataManager já
-funciona sem esses arquivos (mostra avisos claros em vez de quebrar), e
-assim que os arquivos reais forem colocados aqui, o programa passa a usá-los
-sem precisar de nenhuma mudança de configuração.
+dados/
+├── Colaboradores.xlsx
+├── Gestores.xlsx
+└── Motivos.xlsx
 
-Se os nomes das colunas dentro dos XLSX reais forem diferentes do que
-data_manager.py espera (ver COLUNAS_CANDIDATAS_* no topo do arquivo), ajuste
-essas listas — não é necessário mudar mais nada.
+O programa carrega essas bases automaticamente por meio de data_manager.py.
 
-Este arquivo (LEIA-ME.txt) pode ser apagado quando os XLSX reais forem
-colocados aqui.
+Importante
+
+Esses arquivos contêm dados reais utilizados pelo sistema e não devem ser enviados ao Git.
+
+O .gitignore já está configurado para ignorar os arquivos .xlsx desta pasta.
+
+Colaboradores.xlsx
+
+Utilizado para validar as matrículas reconhecidas pelo OCR e obter informações complementares do colaborador.
+
+Gestores.xlsx
+
+Utilizado para identificar e validar o responsável pela liberação.
+
+Motivos.xlsx
+
+Utilizado para validar e normalizar os motivos das liberações.
+
+Cabeçalhos
+
+O DataManager identifica os cabeçalhos de forma tolerante a maiúsculas, acentos e espaços.
+
+Caso os nomes das colunas das planilhas sejam diferentes dos cabeçalhos esperados, ajuste as listas CANDIDATOS_* em data_manager.py.
+
+Não é necessário alterar os arquivos XLSX para adequá-los ao sistema.
+
+Auxiliares
+
+Auxiliares.xlsx não é utilizado pelo sistema atual e não precisa ser colocado nesta pasta.
+
+Para uma nova instalação
+
+Ao copiar o projeto para outro computador, coloque manualmente as três bases reais nesta pasta antes de executar o programa.
+
+Não substitua essas bases por dados fictícios ou exemplos.

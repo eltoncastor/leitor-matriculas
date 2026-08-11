@@ -1,56 +1,96 @@
 # Pasta `dados/`
 
-Coloque aqui os três arquivos reais, exatamente com estes nomes:
+Esta pasta contém as bases XLSX utilizadas pelo sistema para validação e consulta.
 
-```
+```text
 dados/
 ├── Colaboradores.xlsx
-├── Motivos.xlsx
-└── Gestores.xlsx
+├── Gestores.xlsx
+└── Motivos.xlsx
 ```
 
-Esta pasta está vazia de propósito — os arquivos reais ainda não foram
-fornecidos ao assistente durante o desenvolvimento, então nenhum dado de
-exemplo foi criado (nem nomes, nem matrículas, nem cabeçalhos inventados).
+> **Importante:** os arquivos XLSX reais não devem ser versionados no Git. Eles podem conter dados internos de colaboradores e devem permanecer apenas no ambiente local.
 
-## O que o `data_manager.py` espera de cada arquivo
-
-O `DataManager` procura a coluna certa pelo **nome do cabeçalho na primeira
-linha** de cada planilha, comparando de forma tolerante a maiúsculas,
-acentos e espaços. Ele tenta, nesta ordem, os seguintes nomes candidatos
-(ajustáveis em `data_manager.py`, nas listas `CANDIDATOS_*`):
+## Bases utilizadas
 
 ### `Colaboradores.xlsx`
 
-| Campo | Cabeçalhos candidatos hoje |
-|---|---|
-| matrícula (obrigatório) | matricula, matricula colaborador, cod colaborador, codigo, codigo colaborador, registro, num matricula, numero matricula, chapa, num registro |
-| nome | nome, nome colaborador, colaborador, funcionario, nome completo |
-| cargo | cargo, funcao, cargo colaborador |
-| setor | setor, departamento, area, setor colaborador |
+Base utilizada para validar a matrícula reconhecida pelo OCR.
 
-Se a coluna de matrícula não for encontrada, o carregamento falha com uma
-mensagem clara (não trava o programa) — nesse caso, adicione o cabeçalho
-real à lista `CANDIDATOS_MATRICULA`.
+A matrícula é o campo obrigatório. Nome, cargo e setor são informações complementares e **não são reconhecidos pelo OCR**.
 
-Nome/cargo/setor são opcionais: se não forem encontrados, o colaborador é
-carregado só com a matrícula.
+O sistema utiliza a matrícula para localizar posteriormente essas informações na base de colaboradores.
 
-### `Motivos.xlsx`
+Cabeçalhos candidatos para matrícula:
 
-Coluna candidata: motivo, motivos, descricao, nome motivo, descricao
-motivo. Se nenhuma bater, a primeira coluna da planilha é usada.
+```text
+matricula
+matricula colaborador
+cod colaborador
+codigo
+codigo colaborador
+registro
+num matricula
+numero matricula
+chapa
+num registro
+```
 
-### `Gestores.xlsx`
+Cabeçalhos candidatos para informações complementares:
 
-Coluna candidata: gestor, gestores, nome gestor, nome. Se nenhuma bater, a
-primeira coluna da planilha é usada.
+| Campo | Cabeçalhos candidatos                                           |
+| ----- | --------------------------------------------------------------- |
+| Nome  | nome, nome colaborador, colaborador, funcionario, nome completo |
+| Cargo | cargo, funcao, cargo colaborador                                |
+| Setor | setor, departamento, area, setor colaborador                    |
 
-## Depois de colocar os arquivos reais aqui
+Se a coluna de matrícula não for encontrada, o sistema informa o problema sem travar a aplicação.
 
-Quando os três arquivos forem colocados nesta pasta, a segunda etapa
-combinada com o usuário é: abrir cada planilha, conferir os cabeçalhos
-reais, ajustar as listas `CANDIDATOS_*` em `data_manager.py` se necessário,
-e então validar as consultas (`buscar_colaborador`, `listar_motivos`,
-`listar_gestores`) com dados de verdade — inclusive testando matrículas com
-zero à esquerda.
+## `Gestores.xlsx`
+
+Base utilizada para validar e identificar o responsável pela liberação.
+
+Cabeçalhos candidatos:
+
+```text
+gestor
+gestores
+nome gestor
+nome
+```
+
+O sistema identifica o gestor a partir do texto manuscrito e não deve incluir textos residuais desconhecidos no resultado.
+
+## `Motivos.xlsx`
+
+Base utilizada para validar e normalizar o motivo da liberação.
+
+Cabeçalhos candidatos:
+
+```text
+motivo
+motivos
+descricao
+nome motivo
+descricao motivo
+```
+
+Quando nenhuma dessas opções for encontrada, a primeira coluna da planilha pode ser utilizada.
+
+## Regras importantes
+
+* Os nomes dos arquivos devem permanecer exatamente como especificados.
+* A primeira linha de cada planilha deve conter os cabeçalhos.
+* A identificação dos cabeçalhos é tolerante a maiúsculas, acentos e espaços.
+* `Colaboradores.xlsx`, `Gestores.xlsx` e `Motivos.xlsx` são bases reais fornecidas pelo usuário.
+* `Auxiliares.xlsx` **não é utilizado pelo sistema** e não precisa estar presente.
+* O sistema não cria dados fictícios para substituir essas bases.
+* Matrículas com zero à esquerda devem ser preservadas corretamente.
+
+## Dados locais
+
+Esta pasta é parte do ambiente local da aplicação. Os arquivos reais são ignorados pelo Git por segurança.
+
+Para utilizar o projeto em outra máquina, copie manualmente as bases reais para esta pasta antes de executar o processamento.
+
+Consulte `data_manager.py` caso seja necessário adaptar os nomes dos cabeçalhos às planilhas utilizadas no ambiente.
