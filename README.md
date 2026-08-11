@@ -22,6 +22,8 @@ CONFIRMADO / REVISÃO
 Planilha XLSX
 ```
 
+---
+
 ## Dados reconhecidos
 
 A extração principal trabalha somente com os campos existentes na folha:
@@ -38,9 +40,9 @@ Responsável
 
 **Nome e Setor não são reconhecidos por OCR.**
 
-Esses dados não fazem parte do resultado principal da extração e serão obtidos posteriormente a partir da matrícula, por exemplo utilizando `PROCX/XLOOKUP` em outra planilha.
+Esses dados não fazem parte do resultado principal da extração e podem ser obtidos posteriormente a partir da matrícula, por exemplo utilizando `PROCX/XLOOKUP` em outra planilha.
 
-Isso evita processamento desnecessário e reduz o risco de associar uma pessoa incorreta a uma matrícula.
+Essa abordagem evita processamento desnecessário e reduz o risco de associar uma pessoa incorreta a uma matrícula.
 
 ### Hora
 
@@ -58,33 +60,31 @@ O sistema nunca inventa uma hora.
 
 ### Responsável
 
-O campo Responsável representa principalmente o **gestor que autorizou a liberação**.
+O campo Responsável representa o gestor que autorizou a liberação.
 
-Algumas folhas podem conter texto adicional após o gestor, como o nome de um auxiliar que estava na portaria. Esse texto residual é ignorado.
+Algumas folhas podem conter texto adicional após o gestor. Quando o gestor é identificado com segurança, esse texto residual desconhecido é ignorado.
 
-Exemplo:
+Exemplo fictício:
 
 ```text
-GRL - FABIANA - ESLEON
-```
+OCR:
+GRX - GESTOR EXEMPLO - TEXTO_RESIDUAL
 
 Resultado:
-
-```text
-Responsável = GRL - FABIANA
+Responsável = GRX - GESTOR EXEMPLO
 ```
 
-O sistema não tenta identificar ou corrigir o nome do auxiliar.
+O sistema não tenta identificar ou corrigir o texto residual.
 
-Nomes compostos e identificações com código de cargo são preservados.
+Nomes compostos e códigos de gestores são preservados.
 
-Exemplos válidos:
+Exemplos fictícios:
 
 ```text
-GR3 - DIANA
-GR4 - ANDRÉ VALENÇA
-ANDERSON ABREU
-ANDERSON CARLOS
+GRX - GESTOR EXEMPLO
+GRY - OUTRO GESTOR
+GESTOR EXEMPLO
+NOME COMPOSTO EXEMPLO
 ```
 
 Quando o gestor não puder ser identificado com segurança, o registro é enviado para `REVISÃO`.
@@ -119,7 +119,7 @@ leitor_matriculas/
 └── README.md
 ```
 
-A estrutura atual ainda será reorganizada em uma futura fase de refatoração arquitetural. Essa reorganização deverá preservar o comportamento e os testes existentes.
+> A estrutura atual ainda será reorganizada em uma futura fase de refatoração arquitetural. Essa reorganização deverá preservar o comportamento e os testes existentes.
 
 ---
 
@@ -153,34 +153,36 @@ dados/
 └── Motivos.xlsx
 ```
 
+Esses arquivos contêm dados operacionais e devem ser tratados como **dados locais e sensíveis**.
+
+Eles **não fazem parte do repositório público**.
+
 ### Colaboradores.xlsx
 
 Utilizada para validação da matrícula.
 
 O sistema não precisa reconhecer Nome ou Setor por OCR.
 
-A matrícula é utilizada posteriormente para obter essas informações.
+A matrícula reconhecida pode ser utilizada posteriormente para obter essas informações em uma base de colaboradores.
 
 ### Gestores.xlsx
 
 Contém os gestores e suas possíveis formas de identificação.
 
-A base pode conter:
+Uma mesma pessoa pode possuir diferentes formas válidas de identificação, como:
 
 ```text
-GR3 - DIANA
-GR3
-DIANA
-ANDERSON ABREU
-ABREU
-A. ABREU
+CÓDIGO - NOME
+CÓDIGO
+NOME
+NOME ABREVIADO
 ```
 
-Essas entradas não devem necessariamente ser interpretadas como pessoas diferentes. Algumas podem representar aliases, códigos ou formas alternativas de identificação.
+Essas formas podem representar aliases ou identificadores alternativos e não necessariamente pessoas diferentes.
 
 ### Motivos.xlsx
 
-Contém os motivos válidos utilizados na validação e no fuzzy matching controlado.
+Contém os motivos válidos utilizados na validação e na correspondência aproximada controlada.
 
 ---
 
@@ -248,7 +250,7 @@ A confirmação considera principalmente:
 * confiança do OCR;
 * correspondências aproximadas quando aplicáveis.
 
-A Hora não é obrigatória para confirmação.
+A Hora **não é obrigatória** para confirmação.
 
 ### REVISÃO
 
@@ -263,7 +265,7 @@ Exemplos:
 * data inválida ou incompleta;
 * informação insuficiente para confirmação.
 
-O sistema não inventa dados para evitar uma revisão.
+O sistema prefere enviar um registro para `REVISÃO` a inventar ou associar uma informação sem evidência suficiente.
 
 ---
 
@@ -289,19 +291,19 @@ Se dois candidatos forem muito próximos ou houver ambiguidade, o registro vai p
 
 O gestor deve ser identificado antes que qualquer texto residual seja considerado.
 
-Exemplo:
+Exemplo fictício:
 
 ```text
 OCR:
-GR3 - DIANA - TEXTO_DESCONHECIDO
+GRX - GESTOR EXEMPLO - TEXTO_DESCONHECIDO
 
 Resultado:
-Responsável = GR3 - DIANA
+Responsável = GRX - GESTOR EXEMPLO
 ```
 
 O texto desconhecido é ignorado.
 
-Não existe mais reconhecimento de auxiliar de portaria no resultado.
+Não existe reconhecimento de informações adicionais de auxiliares no resultado principal.
 
 ---
 
@@ -316,7 +318,7 @@ O sistema não deve ordenar os registros por:
 * gestor;
 * motivo.
 
-A sequência da folha é a referência principal para a saída.
+A sequência física das liberações é a referência principal para a saída.
 
 ---
 
@@ -392,7 +394,7 @@ python teste\teste_worker_imagem_falha.py
 
 A suíte atual possui **100 testes sintéticos + integração UI**, todos aprovados no último ciclo de estabilização.
 
-Também foram realizados testes com PaddleOCR real sobre um PDF contendo **5 folhas reais**.
+Também foram realizados testes com PaddleOCR real sobre um conjunto de cinco folhas reais.
 
 Resultado:
 
@@ -403,13 +405,15 @@ Encontrado: 40 liberações
 40/40 = 100%
 ```
 
+Os dados utilizados nesses testes são locais e não fazem parte do repositório público.
+
 ---
 
 ## Validação com dados reais
 
-O sistema foi validado com um PDF real contendo cinco folhas.
+O sistema foi validado com um conjunto real contendo cinco folhas.
 
-Resultado:
+Resultado estrutural:
 
 | Página    | Liberações esperadas | Detectadas |
 | --------- | -------------------: | ---------: |
@@ -420,11 +424,13 @@ Resultado:
 | 5         |                    8 |          8 |
 | **Total** |               **40** |     **40** |
 
-A página 3 inicialmente apresentava apenas cinco registros devido a um problema no agrupamento espacial dos elementos OCR.
+Uma das páginas inicialmente apresentava apenas cinco registros devido a um problema no agrupamento espacial dos elementos OCR.
 
 O algoritmo de agrupamento foi corrigido e a página passou a detectar corretamente as oito liberações.
 
 Nenhum registro fantasma foi observado após a correção.
+
+> Os arquivos originais utilizados nessa validação não são armazenados no repositório público.
 
 ---
 
@@ -454,6 +460,10 @@ A sequência física das liberações é mantida.
 
 Uma exceção não deve deixar a interface travada ou impedir o processamento restante.
 
+### Dados reais não devem ser versionados
+
+Bases de colaboradores, gestores, motivos, imagens de documentos e arquivos de saída contendo dados reais devem permanecer fora do repositório público.
+
 ---
 
 ## Limitações atuais
@@ -474,19 +484,37 @@ O pré-processamento atual utiliza:
 
 ```text
 OpenCV
-↓
+   ↓
 grayscale
-↓
+   ↓
 redução de ruído
-↓
+   ↓
 CLAHE
-↓
+   ↓
 nitidez
 ```
 
-Testes com folha de tonalidade escura não demonstraram vantagem consistente de abandonar o grayscale atual.
+Testes com folhas de tonalidade escura não demonstraram vantagem consistente de abandonar o grayscale atual.
 
 Por isso, nenhuma alteração foi feita apenas para tentar acelerar ou modificar o pré-processamento sem evidência de ganho.
+
+---
+
+## Segurança dos dados
+
+O projeto pode trabalhar com informações pessoais e operacionais presentes nas folhas e nas bases XLSX.
+
+Por isso:
+
+* arquivos reais de colaboradores não devem ser enviados ao repositório público;
+* imagens reais de documentos não devem ser versionadas;
+* PDFs reais não devem ser versionados;
+* planilhas de entrada e saída contendo dados reais não devem ser versionadas;
+* logs contendo informações sensíveis devem permanecer fora do repositório;
+* exemplos presentes na documentação devem utilizar dados fictícios;
+* o arquivo `.gitignore` deve impedir o versionamento acidental de arquivos locais.
+
+O repositório contém apenas o código, testes e documentação necessários ao desenvolvimento do sistema.
 
 ---
 
