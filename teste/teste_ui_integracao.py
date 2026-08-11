@@ -147,35 +147,31 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
     # cima); só passa a valer para o que `_confirmar` reavaliar agora.
     app._data_manager = _DMRevisaoDeterministica()
 
+    # A revisão deixou de ser uma janela Toplevel (Fase 10) e virou uma
+    # ABA da janela principal. Este trecho passou a dirigi-la pela API
+    # programática (_indices_pendentes_revisao / _revisao_ir_para /
+    # _revisao_confirmar / revisao_vars) em vez de caçar widgets na árvore
+    # do Tk. O que é verificado continua sendo exatamente o mesmo
+    # COMPORTAMENTO da Fase 7 (PROBLEMAS C/D/E) -- só o caminho até ele
+    # mudou, e agora não quebra a cada ajuste de layout.
     print("Botao revisao:", app.btn_revisao.cget('text'))
     app._abrir_revisao()
-    # pega a janela Toplevel criada
-    toplevels = [w for w in app.winfo_children() if isinstance(w, __import__('tkinter').Toplevel)]
-    assert toplevels, "janela de revisao nao foi criada"
-    janela = toplevels[0]
-    tabela_rev = [w for w in janela.winfo_children() if isinstance(w, __import__('tkinter').ttk.Treeview)][0]
-    itens = tabela_rev.get_children()
-    print("Itens pendentes na revisao:", len(itens))
-    assert len(itens) == app._contador_revisao
-    # PROBLEMA E: esta janela só pode conter linhas REVISAO -- nenhuma
-    # ERRO (página que falhou não tem campo nenhum de verdade a corrigir).
+    pendentes = app._indices_pendentes_revisao()
+    print("Itens pendentes na revisao:", len(pendentes))
+    assert len(pendentes) == app._contador_revisao
+    # PROBLEMA E: a revisão só pode listar linhas REVISAO -- nenhuma ERRO
+    # (página que falhou não tem campo nenhum de verdade a corrigir).
     assert app._paginas_com_erro == 0  # este lote não teve página com erro
-
-    import tkinter as _tk
-    frame_edicao = [w for w in janela.winfo_children() if isinstance(w, _tk.ttk.LabelFrame)][0]
-    botao_confirmar = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Button)][0]
 
     # -------- 1) correção REAL (matrícula corrigida para uma que a base
     # (fake) reconhece) -- deve virar CONFIRMADO, e Nome/Setor/Cargo
     # devem ser re-consultados (PROBLEMA C), não ficar em "(não encontrado)".
     revisao_antes = app._contador_revisao
     confirmados_antes = app._contador_confirmados
-    tabela_rev.selection_set(itens[0])
-    tabela_rev.event_generate("<<TreeviewSelect>>")
+    app._revisao_ir_para(0)
     app.update()
-    entries = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Entry)]
-    entries[0].delete(0, 'end'); entries[0].insert(0, "28972")  # matrícula reconhecida pela fake DM
-    botao_confirmar.invoke()
+    app.revisao_vars["matricula"].set("28972")  # matrícula reconhecida pela fake DM
+    app._revisao_confirmar()
     app.update()
 
     assert app._contador_revisao == revisao_antes - 1
@@ -196,38 +192,53 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
 
     # -------- 2) correção que NÃO resolve o problema real -- Fase 7
     # (PROBLEMA D): não pode virar CONFIRMADO só por ter clicado o botão.
-    if len(itens) >= 2:
-        tabela_rev.selection_set(itens[1])
-        tabela_rev.event_generate("<<TreeviewSelect>>")
+    pendentes_2 = app._indices_pendentes_revisao()
+    if pendentes_2:
+        indice_pendente = pendentes_2[0]
+        app._revisao_ir_para(0)
         app.update()
-        entries2 = [w for w in frame_edicao.winfo_children() if isinstance(w, _tk.ttk.Entry)]
-        entries2[0].delete(0, 'end'); entries2[0].insert(0, "00000")  # a fake DM não reconhece
+        app.revisao_vars["matricula"].set("00000")  # a fake DM não reconhece
         revisao_antes_2 = app._contador_revisao
-        botao_confirmar.invoke()
+        app._revisao_confirmar()
         app.update()
         assert app._contador_revisao == revisao_antes_2, "registro nao corrigido de verdade nao pode virar CONFIRMADO"
-        assert itens[1] in tabela_rev.get_children(), "registro ainda pendente deve continuar na lista"
+        assert indice_pendente in app._indices_pendentes_revisao(), "registro ainda pendente deve continuar na lista"
         print("OK: PROBLEMA D -- correcao que nao resolve o problema real permanece em REVISAO")
 
-    if janela.winfo_exists():
-        janela.destroy()
+    # -------- 3) Fase 10: DATA e HORA agora são editáveis na revisão.
+    # Antes uma linha barrada pela data era impossível de resolver dentro
+    # do programa (não havia campo para corrigi-la).
+    assert "data" in app.revisao_vars and "hora" in app.revisao_vars, \
+        "a revisão precisa permitir editar DATA e HORA"
+    pendentes_3 = app._indices_pendentes_revisao()
+    if pendentes_3:
+        app._revisao_ir_para(0)
+        app.update()
+        registro_alvo = app._registros_exportacao[pendentes_3[0]]
+        app.revisao_vars["matricula"].set("28972")
+        app.revisao_vars["data"].set("23/04/2026")
+        app.revisao_vars["hora"].set("11:05")
+        app._revisao_confirmar()
+        app.update()
+        assert registro_alvo["data"] == "23/04/26", registro_alvo
+        assert registro_alvo["hora"] == "11:05", registro_alvo
+        print("OK: Fase 10 -- DATA/HORA editadas na revisao saem no formato canonico")
 
-    # -------- PROBLEMA E: uma linha ERRO nunca pode aparecer na revisão --------
+    # -------- PROBLEMA E: uma linha ERRO nunca pode entrar na revisão ------
     app._registros_exportacao.append({
         "data": "", "hora": "", "matricula": "", "nome": "", "cargo": "", "setor": "",
         "gestor": "", "motivo": "", "pagina_origem": 999, "status": "ERRO",
         "confianca_matricula": "", "confianca_gestor": "", "confianca_motivo": "",
         "observacao": "falha simulada de pagina", "texto_ocr_original": "",
     })
-    app._abrir_revisao()
-    toplevels_e = [w for w in app.winfo_children() if isinstance(w, __import__('tkinter').Toplevel)]
-    if toplevels_e:
-        janela_e = toplevels_e[-1]
-        tabela_rev_e = [w for w in janela_e.winfo_children() if isinstance(w, __import__('tkinter').ttk.Treeview)][0]
-        valores_pagina = [tabela_rev_e.item(i, 'values')[0] for i in tabela_rev_e.get_children()]
-        assert 999 not in valores_pagina, "linha ERRO nao pode aparecer na janela de revisao"
-        janela_e.destroy()
-    print("OK: PROBLEMA E -- linha ERRO nunca aparece na janela de revisao manual")
+    indice_erro = len(app._registros_exportacao) - 1
+    assert indice_erro not in app._indices_pendentes_revisao(), \
+        "linha ERRO nao pode aparecer na revisao manual"
+    paginas_pendentes = [
+        app._registros_exportacao[i]["pagina_origem"] for i in app._indices_pendentes_revisao()
+    ]
+    assert 999 not in paginas_pendentes, "linha ERRO nao pode aparecer na revisao manual"
+    print("OK: PROBLEMA E -- linha ERRO nunca aparece na revisao manual")
 
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()

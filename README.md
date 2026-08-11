@@ -1,6 +1,6 @@
 # Leitor de Matrículas Manuscritas
 
-Ferramenta desktop para Windows, desenvolvida em Python/Tkinter, que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
+Ferramenta desktop para Windows, desenvolvida em Python/Tkinter (com `ttkbootstrap` para o tema visual), que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
 
 O sistema utiliza OCR com PaddleOCR para reconhecer os dados manuscritos, valida as informações contra bases XLSX e envia automaticamente para revisão manual os casos que não podem ser confirmados com segurança.
 
@@ -161,7 +161,7 @@ O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acr
 | Módulo                                            | Responsabilidade                                         |
 | ------------------------------------------------- | -------------------------------------------------------- |
 | `main.py`                                          | Ponto de entrada                                         |
-| `ui/app.py`                                        | Interface gráfica Tkinter e coordenação do processamento |
+| `ui/app.py`                                        | Interface gráfica (abas Registros/Revisão/Avisos) e coordenação do processamento |
 | `ocr/engine.py`                                    | Inicialização e execução do PaddleOCR                    |
 | `ocr/image_processor.py`                           | Pré-processamento das imagens                            |
 | `ocr/pdf_reader.py`                                | Renderização de PDFs página por página                   |
@@ -275,7 +275,26 @@ Uma falha em uma página não deve interromper o processamento das demais.
 
 ### Revisão
 
-Exibe registros que não puderam ser confirmados automaticamente.
+Aba dedicada à correção manual dos registros que não puderam ser confirmados automaticamente.
+
+Ela mostra, lado a lado:
+
+* a **foto da folha** correspondente, com zoom — para conferir o que está escrito no papel sem sair do programa;
+* o **motivo** pelo qual aquela linha não pôde ser confirmada;
+* os **campos editáveis**: Data, Hora, Matrícula, Motivo e Responsável;
+* **Nome e Setor**, obtidos da base pela matrícula (nunca digitados).
+
+Motivo e Responsável são listas alimentadas pelas bases — o valor válido só pode ser um dos cadastrados.
+
+A navegação percorre os pendentes em sequência, na ordem física das folhas.
+
+**Confirmar uma correção não marca o registro como confirmado.** O programa remonta o registro com os valores digitados e roda exatamente a mesma validação do fluxo automático. Se a correção não resolver o problema real, a linha **permanece em revisão**, com a observação atualizada explicando o que ainda falta.
+
+Linhas com `ERRO` não aparecem aqui: uma página que falhou não tem campo algum a corrigir e precisa ser reprocessada.
+
+### Avisos
+
+Reúne os apontamentos que não bloqueiam o processamento: páginas com erro, páginas cuja contagem de liberações divergiu do esperado, linhas sem matrícula identificável e problemas nas bases de dados.
 
 ### Gerar XLSX
 

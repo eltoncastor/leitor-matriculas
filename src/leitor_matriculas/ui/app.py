@@ -1,29 +1,53 @@
 """
-ui.py
+ui/app.py
 
-Interface gráfica (Tkinter). Coordena: seleção de imagem/PDF -> pré-
-processamento (image_processor) -> OCR (ocr_engine) -> parser espacial
-(registro_parser) -> validação (validacao) -> tabela/revisão -> exportação
-XLSX (xlsx_exporter). Toda a lógica de negócio vive nos outros módulos; a
-UI só chama e apresenta.
+Interface gráfica. Coordena: seleção de imagem/PDF -> pré-processamento
+(image_processor) -> OCR (ocr_engine) -> parser espacial (registro_parser)
+-> validação (validacao) -> revisão/edição -> exportação XLSX
+(xlsx_exporter). Toda a lógica de negócio vive nos outros módulos; a UI só
+chama e apresenta.
 
 OCR roda em thread separada (threading.Thread); a comunicação de volta usa
 queue.Queue consumida só pela thread principal via self.after — a worker
 thread NUNCA chama métodos do Tkinter diretamente.
+
+BASE VISUAL (Fase 10): `ttkbootstrap`, que é ttk por baixo — os widgets
+continuam sendo `ttk.*` (inclusive o Treeview, que é o centro deste app) e
+por isso a troca não exigiu reescrever a interface, só re-hospedá-la. O que
+ele acrescenta é tema, variantes de botão (`bootstyle`) e cores de estado.
+
+LAYOUT (Fase 10): a janela é dividida em cabeçalho (ações + progresso),
+um Notebook com três abas e uma barra de estado:
+
+    Registros -- a tabela de acompanhamento, com cor por status e filtro.
+    Revisão   -- a foto da folha ao lado do formulário de edição.
+    Avisos    -- tudo que antes eram messagebox soltas em quatro botões.
+
+REVISÃO (Fase 10): deixou de ser uma janela separada e passou a ser uma
+aba, porque revisar ~50 folhas em sequência numa caixa de diálogo modal é
+o oposto de um fluxo. Além disso agora edita DATA e HORA, que antes não
+tinham campo nenhum — uma linha barrada pela data era literalmente
+impossível de resolver dentro do programa (o próprio código avisava isso
+ao operador e mandava conferir no papel). O que NÃO mudou é a regra: o
+botão continua sem poder "marcar como confirmado". Ele reconstrói um
+Registro com os valores digitados e roda a MESMA `classificar_registro`
+do fluxo automático; só sai de REVISAO o que a validação aceitar.
 """
 
+import io
 import logging
 import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
+import ttkbootstrap as tb
 from PIL import Image, ImageTk
 
-from leitor_matriculas.ocr.image_processor import preprocess_image, to_display_rgb
+from leitor_matriculas.ocr.image_processor import preprocess_image
 from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
 from leitor_matriculas.dados.data_manager import DataManager
 from leitor_matriculas.parsing.registro_parser import (
@@ -41,7 +65,8 @@ from leitor_matriculas.exportacao import xlsx_exporter
 
 EXTENSOES_IMAGEM = [("Imagens", "*.jpg *.jpeg *.png *.webp"), ("Todos", "*.*")]
 EXTENSOES_PDF = [("PDF", "*.pdf")]
-TAMANHO_PREVIEW = (380, 380)
+
+TEMA = "cosmo"
 
 # Placeholder explícito para Nome/Cargo/Setor quando a matrícula não pôde
 # ser associada a um colaborador da base — nunca deixamos a célula "vazia
@@ -53,16 +78,47 @@ NAO_ENCONTRADO = "(não encontrado)"
 # final — Data/Hora/Matrícula/Nome/Setor/Motivo/Responsável — é aplicada
 # em xlsx_exporter.py; aqui a tabela de acompanhamento prioriza Página/
 # Status para leitura rápida durante o processamento).
+#
+# A Observação ganhou COLUNA PRÓPRIA (Fase 10). Antes ela era concatenada
+# dentro da célula de Status ("⚠ REVISÃO — matrícula não encontrada; motivo
+# normalizado..."), o que espremia o motivo real da revisão numa coluna de
+# 220px e truncava exatamente a informação de que o operador precisa.
 COLUNAS_TABELA = (
     "pagina", "status", "data", "hora", "matricula", "nome", "setor",
-    "motivo", "gestor", "cargo", "confianca",
+    "motivo", "gestor", "cargo", "confianca", "observacao",
 )
 CABECALHOS_TABELA = {
     "pagina": "Pág.", "status": "Status",
     "data": "Data", "hora": "Hora", "matricula": "Matrícula",
     "nome": "Nome", "setor": "Setor", "motivo": "Motivo",
     "gestor": "Responsável", "cargo": "Cargo", "confianca": "Confiança",
+    "observacao": "Observação",
 }
+# Somadas, estas larguras cabem na janela no tamanho padrão -- senão a
+# Observação, que é a ÚLTIMA coluna e justamente a que diz por que a linha
+# precisa de revisão, nasce fora da tela e só aparece se o operador rolar
+# na horizontal (foi o que aconteceu na primeira versão desta tela).
+LARGURAS_TABELA = {
+    "pagina": 46, "status": 116, "data": 74, "hora": 56, "matricula": 84,
+    "nome": 172, "setor": 124, "motivo": 122, "gestor": 128, "cargo": 118,
+    "confianca": 72, "observacao": 280,
+}
+# Altura das linhas da tabela. O padrão do ttk aperta demais as linhas para
+# uma tabela que se lê durante uma hora de lote.
+ALTURA_LINHA_TABELA = 26
+# Colunas que ficam alinhadas à esquerda por serem texto corrido; as demais
+# (números, códigos, status) ficam centradas.
+COLUNAS_A_ESQUERDA = {"nome", "setor", "cargo", "observacao"}
+
+FILTROS_TABELA = ("Todos", "Confirmados", "Em revisão", "Com erro")
+
+# Maior dimensão guardada da foto de cada página para a aba de Revisão.
+# A foto é guardada JÁ COMPRIMIDA em JPEG (bytes), não como matriz: um
+# lote real de ~50 folhas em matriz numpy passaria de 1 GB de RAM, enquanto
+# em JPEG reduzido fica na casa de dezenas de MB. A decodificação sob
+# demanda custa milissegundos, contra ~65 s de OCR por página.
+LARGURA_MAXIMA_MINIATURA = 1500
+QUALIDADE_MINIATURA = 85
 
 
 def _ler_imagem(path: str) -> np.ndarray:
@@ -73,10 +129,27 @@ def _ler_imagem(path: str) -> np.ndarray:
     return imagem
 
 
-def _para_photoimage(imagem_rgb: np.ndarray, max_size=TAMANHO_PREVIEW) -> ImageTk.PhotoImage:
-    pil_img = Image.fromarray(imagem_rgb)
-    pil_img.thumbnail(max_size, Image.LANCZOS)
-    return ImageTk.PhotoImage(pil_img)
+def _comprimir_para_miniatura(imagem_bgr):
+    """
+    Reduz e comprime a foto da página para guardá-la em memória durante o
+    lote (ver LARGURA_MAXIMA_MINIATURA). Devolve bytes JPEG ou None se a
+    compressão falhar — a foto é uma comodidade da revisão, nunca um dado:
+    falhar aqui não pode derrubar o processamento.
+    """
+    try:
+        altura, largura = imagem_bgr.shape[:2]
+        maior = max(altura, largura)
+        if maior > LARGURA_MAXIMA_MINIATURA:
+            fator = LARGURA_MAXIMA_MINIATURA / maior
+            imagem_bgr = cv2.resize(
+                imagem_bgr, (int(largura * fator), int(altura * fator)),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buffer = cv2.imencode(".jpg", imagem_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), QUALIDADE_MINIATURA])
+        return buffer.tobytes() if ok else None
+    except Exception:
+        logging.exception("Falha ao preparar miniatura da página (revisão segue sem a foto)")
+        return None
 
 
 def _texto_campo(registro, nome_campo: str) -> str:
@@ -121,12 +194,12 @@ def _reparar_data_hora_mescladas(registros):
         )
 
 
-class App(tk.Tk):
+class App(tb.Window):
     def __init__(self):
-        super().__init__()
+        super().__init__(themename=TEMA)
         self.title("Leitor de Planilhas by Elton Marques")
-        self.geometry("1180x780")
-        self.minsize(1000, 640)
+        self.geometry("1400x860")
+        self.minsize(1120, 700)
 
         self._ocr_engine = None
         self._data_manager = DataManager()
@@ -160,78 +233,318 @@ class App(tk.Tk):
         self._total_paginas_lote = None
         self._paginas_processadas_lote = 0
 
+        # Foto de cada página (JPEG comprimido), para a aba de Revisão.
+        self._miniaturas_por_pagina = {}
+        # Estado da aba de Revisão.
+        self._revisao_indices = []   # índices em _registros_exportacao, na ordem física
+        self._revisao_posicao = 0    # posição atual dentro de _revisao_indices
+        self._revisao_zoom = 1.0
+        self._foto_revisao = None    # referência viva do PhotoImage (senão o Tk descarta)
+
         self._montar_layout()
+        self._atualizar_status()
+        self._atualizar_avisos()
+        self._atualizar_painel_revisao()
+
+    # ==================================================================
+    # LAYOUT
+    # ==================================================================
+    def _montar_layout(self):
+        # Linhas mais altas em TODAS as tabelas (ver ALTURA_LINHA_TABELA).
+        try:
+            estilo = tb.Style()
+            estilo.configure("Treeview", rowheight=ALTURA_LINHA_TABELA)
+        except Exception:
+            logging.exception("Falha ao ajustar a altura das linhas (apenas cosmético)")
+
+        self._montar_cabecalho()
+
+        self.abas = ttk.Notebook(self)
+        self.abas.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 8))
+        self._montar_aba_registros()
+        self._montar_aba_revisao()
+        self._montar_aba_avisos()
+
+        self._montar_rodape()
 
     # ------------------------------------------------------------------
-    def _montar_layout(self):
-        barra = ttk.Frame(self, padding=10)
-        barra.pack(side="top", fill="x")
+    def _montar_cabecalho(self):
+        cabecalho = ttk.Frame(self, padding=(12, 12, 12, 8))
+        cabecalho.pack(side="top", fill="x")
 
-        self.btn_imagem = ttk.Button(barra, text="Selecionar imagem", command=self._on_selecionar_imagem)
+        # Ações de ENTRADA à esquerda; a ação de SAÍDA ("Gerar planilha")
+        # fica destacada à direita. Antes todos os botões tinham exatamente
+        # o mesmo peso visual, então a ação que encerra o trabalho parecia
+        # tão importante quanto "Ver avisos".
+        entrada = ttk.Frame(cabecalho)
+        entrada.pack(side="left")
+
+        self.btn_imagem = ttk.Button(
+            entrada, text="Selecionar imagens", bootstyle="primary",
+            command=self._on_selecionar_imagem, width=20,
+        )
         self.btn_imagem.pack(side="left", padx=(0, 6))
-        self.btn_pdf = ttk.Button(barra, text="Selecionar PDF", command=self._on_selecionar_pdf)
+        self.btn_pdf = ttk.Button(
+            entrada, text="Selecionar PDF", bootstyle="primary-outline",
+            command=self._on_selecionar_pdf, width=18,
+        )
         self.btn_pdf.pack(side="left", padx=(0, 6))
-        self.btn_limpar = ttk.Button(barra, text="Limpar resultados", command=self._on_limpar)
-        self.btn_limpar.pack(side="left", padx=(0, 6))
-        self.btn_revisao = ttk.Button(barra, text="Abrir revisão (0)", command=self._abrir_revisao, state="disabled")
-        self.btn_revisao.pack(side="left", padx=(0, 6))
-        self.btn_salvar = ttk.Button(barra, text="Gerar planilha", command=self._on_salvar, state="disabled")
-        self.btn_salvar.pack(side="left")
-
-        info = ttk.Frame(self, padding=(10, 0, 10, 6))
-        info.pack(side="top", fill="x")
-        self.lbl_status = ttk.Label(info, text="Nenhum arquivo selecionado.")
-        self.lbl_status.pack(side="left")
-
-        bases = ttk.Frame(self, padding=(10, 0, 10, 10))
-        bases.pack(side="top", fill="x")
-        self.lbl_bases = ttk.Label(bases, text=self._data_manager.resumo_status())
-        self.lbl_bases.pack(side="left")
-        if self._data_manager.avisos:
-            ttk.Label(bases, text="  ⚠ dados/ incompleta", foreground="#b35900").pack(side="left", padx=8)
-            ttk.Button(bases, text="Ver avisos", command=self._mostrar_avisos_bases).pack(side="left")
-        self.btn_erros_pag = ttk.Button(bases, text="Erros de página (0)", command=self._mostrar_erros_paginas, state="disabled")
-        self.btn_erros_pag.pack(side="left", padx=8)
-        self.btn_avisos_contagem = ttk.Button(
-            bases, text="Avisos de contagem (0)", command=self._mostrar_avisos_contagem, state="disabled"
+        self.btn_limpar = ttk.Button(
+            entrada, text="Limpar resultados", bootstyle="secondary-outline",
+            command=self._on_limpar, width=18,
         )
-        self.btn_avisos_contagem.pack(side="left", padx=8)
-        self.btn_avisos_descarte = ttk.Button(
-            bases, text="Linhas sem matrícula (0)", command=self._mostrar_avisos_descarte, state="disabled"
+        self.btn_limpar.pack(side="left")
+
+        saida = ttk.Frame(cabecalho)
+        saida.pack(side="right")
+        self.btn_salvar = ttk.Button(
+            saida, text="Gerar planilha", bootstyle="success",
+            command=self._on_salvar, state="disabled", width=18,
         )
-        self.btn_avisos_descarte.pack(side="left", padx=8)
+        self.btn_salvar.pack(side="right")
+        # Mantido por compatibilidade de fluxo: leva para a aba de Revisão.
+        self.btn_revisao = ttk.Button(
+            saida, text="Revisar (0)", bootstyle="warning-outline",
+            command=self._abrir_revisao, state="disabled", width=16,
+        )
+        self.btn_revisao.pack(side="right", padx=(0, 6))
 
-        frame_imgs = ttk.Frame(self, padding=10)
-        frame_imgs.pack(side="top", fill="x")
-        col_o = ttk.LabelFrame(frame_imgs, text="Última página — original", padding=5)
-        col_o.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.lbl_img_original = ttk.Label(col_o)
-        self.lbl_img_original.pack()
-        col_p = ttk.LabelFrame(frame_imgs, text="Última página — processada", padding=5)
-        col_p.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        self.lbl_img_processada = ttk.Label(col_p)
-        self.lbl_img_processada.pack()
+        # Barra de progresso do lote. O "X/Y" já existia como texto desde a
+        # Fase 7; faltava a leitura visual, que é o que responde "falta
+        # muito?" sem o operador precisar ler número nenhum.
+        #
+        # Ela só aparece ENQUANTO há um lote rodando (ver
+        # _mostrar_progresso). Parada em 100% ela ocupava a faixa inteira
+        # do topo sem informar nada -- a barra de estado no rodapé já diz
+        # "Concluído — Páginas: N | Confirmados: ... | Revisão: ...".
+        self._frame_progresso = ttk.Frame(self, padding=(12, 0, 12, 8))
+        self.barra_progresso = ttk.Progressbar(
+            self._frame_progresso, mode="determinate", maximum=100, value=0, bootstyle="primary-striped",
+        )
+        self.barra_progresso.pack(side="left", fill="x", expand=True)
+        self.lbl_progresso = ttk.Label(self._frame_progresso, text="", width=22, anchor="e")
+        self.lbl_progresso.pack(side="left", padx=(10, 0))
 
-        frame_res = ttk.LabelFrame(self, text="Registros", padding=10)
-        frame_res.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 10))
-        self.tabela = ttk.Treeview(frame_res, columns=COLUNAS_TABELA, show="headings", height=12)
-        larguras = {"pagina": 45, "matricula": 90, "status": 220, "nome": 140, "cargo": 100,
-                    "setor": 100, "data": 70, "hora": 60, "gestor": 120, "motivo": 120, "confianca": 80}
-        for c in COLUNAS_TABELA:
-            self.tabela.heading(c, text=CABECALHOS_TABELA[c])
-            self.tabela.column(c, width=larguras[c], anchor="center")
-        vsb = ttk.Scrollbar(frame_res, orient="vertical", command=self.tabela.yview)
-        hsb = ttk.Scrollbar(frame_res, orient="horizontal", command=self.tabela.xview)
+    # ------------------------------------------------------------------
+    def _montar_aba_registros(self):
+        aba = ttk.Frame(self.abas, padding=10)
+        self.abas.add(aba, text="Registros")
+        self._aba_registros = aba
+
+        filtros = ttk.Frame(aba)
+        filtros.pack(side="top", fill="x", pady=(0, 8))
+        ttk.Label(filtros, text="Mostrar:").pack(side="left", padx=(0, 6))
+        self.filtro_var = tk.StringVar(value=FILTROS_TABELA[0])
+        self.combo_filtro = ttk.Combobox(
+            filtros, textvariable=self.filtro_var, values=list(FILTROS_TABELA),
+            state="readonly", width=14,
+        )
+        self.combo_filtro.pack(side="left")
+        self.combo_filtro.bind("<<ComboboxSelected>>", lambda _e: self._sincronizar_tabela_principal())
+        self.lbl_contagem_tabela = ttk.Label(filtros, text="", bootstyle="secondary")
+        self.lbl_contagem_tabela.pack(side="left", padx=12)
+
+        moldura = ttk.Frame(aba)
+        moldura.pack(side="top", fill="both", expand=True)
+        # Sem bootstyle de cor nas tabelas: a moldura colorida do
+        # ttkbootstrap desenha uma borda grossa em volta da tabela inteira,
+        # que numa tela densa de dados compete com a informação. Quem
+        # comunica o estado aqui é a cor de FUNDO de cada linha (ver as
+        # tags abaixo) e o texto da coluna Status.
+        self.tabela = ttk.Treeview(moldura, columns=COLUNAS_TABELA, show="headings")
+        for coluna in COLUNAS_TABELA:
+            self.tabela.heading(coluna, text=CABECALHOS_TABELA[coluna])
+            self.tabela.column(
+                coluna, width=LARGURAS_TABELA[coluna],
+                anchor="w" if coluna in COLUNAS_A_ESQUERDA else "center",
+                stretch=(coluna == "observacao"),
+            )
+        # Cor por status: o olho encontra a linha problemática antes de ler
+        # qualquer texto. Tons claros de propósito -- o texto continua preto
+        # e legível, sem depender só da cor (o rótulo de status também diz).
+        self.tabela.tag_configure("confirmado", background="#eaf6ec")
+        self.tabela.tag_configure("revisao", background="#fdf4e3")
+        self.tabela.tag_configure("erro", background="#fbe9e7")
+
+        vsb = ttk.Scrollbar(moldura, orient="vertical", command=self.tabela.yview)
+        hsb = ttk.Scrollbar(moldura, orient="horizontal", command=self.tabela.xview)
         self.tabela.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self.tabela.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        frame_res.rowconfigure(0, weight=1)
-        frame_res.columnconfigure(0, weight=1)
+        moldura.rowconfigure(0, weight=1)
+        moldura.columnconfigure(0, weight=1)
+
+        # Duplo clique numa linha em revisão leva direto para ela na aba de
+        # Revisão -- o caminho natural depois de encontrar o problema aqui.
+        self.tabela.bind("<Double-1>", self._on_duplo_clique_tabela)
 
     # ------------------------------------------------------------------
-    # Seleção de arquivo
+    def _montar_aba_revisao(self):
+        aba = ttk.Frame(self.abas, padding=10)
+        self.abas.add(aba, text="Revisão")
+        self._aba_revisao = aba
+
+        painel = ttk.PanedWindow(aba, orient="horizontal")
+        painel.pack(side="top", fill="both", expand=True)
+
+        # ---- esquerda: a foto da folha --------------------------------
+        moldura_foto = ttk.Labelframe(painel, text="Folha digitalizada", padding=8)
+        painel.add(moldura_foto, weight=3)
+
+        controles_foto = ttk.Frame(moldura_foto)
+        controles_foto.pack(side="top", fill="x", pady=(0, 6))
+        ttk.Button(controles_foto, text="−", width=3, bootstyle="secondary-outline",
+                   command=lambda: self._ajustar_zoom(0.8)).pack(side="left")
+        ttk.Button(controles_foto, text="+", width=3, bootstyle="secondary-outline",
+                   command=lambda: self._ajustar_zoom(1.25)).pack(side="left", padx=(4, 0))
+        ttk.Button(controles_foto, text="Ajustar", bootstyle="secondary-outline",
+                   command=self._ajustar_zoom_para_caber).pack(side="left", padx=(4, 0))
+        self.lbl_pagina_foto = ttk.Label(controles_foto, text="", bootstyle="secondary")
+        self.lbl_pagina_foto.pack(side="right")
+
+        moldura_canvas = ttk.Frame(moldura_foto)
+        moldura_canvas.pack(side="top", fill="both", expand=True)
+        self.canvas_foto = tk.Canvas(moldura_canvas, background="#f1f3f5", highlightthickness=0)
+        vsb_foto = ttk.Scrollbar(moldura_canvas, orient="vertical", command=self.canvas_foto.yview)
+        hsb_foto = ttk.Scrollbar(moldura_canvas, orient="horizontal", command=self.canvas_foto.xview)
+        self.canvas_foto.configure(yscrollcommand=vsb_foto.set, xscrollcommand=hsb_foto.set)
+        self.canvas_foto.grid(row=0, column=0, sticky="nsew")
+        vsb_foto.grid(row=0, column=1, sticky="ns")
+        hsb_foto.grid(row=1, column=0, sticky="ew")
+        moldura_canvas.rowconfigure(0, weight=1)
+        moldura_canvas.columnconfigure(0, weight=1)
+
+        # ---- direita: o formulário ------------------------------------
+        moldura_form = ttk.Frame(painel, padding=(12, 0, 0, 0))
+        painel.add(moldura_form, weight=2)
+
+        topo = ttk.Frame(moldura_form)
+        topo.pack(side="top", fill="x")
+        self.lbl_revisao_posicao = ttk.Label(topo, text="", font=("", 11, "bold"))
+        self.lbl_revisao_posicao.pack(side="left")
+
+        self.lbl_revisao_motivo = ttk.Label(
+            moldura_form, text="", bootstyle="warning", wraplength=430, justify="left",
+        )
+        self.lbl_revisao_motivo.pack(side="top", fill="x", pady=(6, 10))
+
+        campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=12)
+        campos.pack(side="top", fill="x")
+
+        self.revisao_vars = {}
+        self.revisao_widgets = {}
+        # MOTIVO e RESPONSÁVEL viram lista fechada (Combobox) porque o valor
+        # válido só pode ser um dos cadastrados -- digitar à mão aqui só
+        # criaria um valor que a validação vai recusar em seguida. Ficam
+        # editáveis (não "readonly") para o operador poder colar/ajustar,
+        # mas com a lista à mão.
+        linhas = [
+            ("data", "Data", "entry", None),
+            ("hora", "Hora", "entry", None),
+            ("matricula", "Matrícula", "entry", None),
+            ("motivo", "Motivo", "combo", self._data_manager.listar_motivos),
+            ("gestor", "Responsável", "combo", self._data_manager.listar_gestores),
+        ]
+        for i, (chave, rotulo, tipo, fonte_valores) in enumerate(linhas):
+            ttk.Label(campos, text=rotulo).grid(row=i, column=0, sticky="w", pady=4, padx=(0, 10))
+            var = tk.StringVar()
+            if tipo == "combo":
+                try:
+                    valores = sorted({str(v).strip() for v in (fonte_valores() or []) if str(v).strip()})
+                except Exception:
+                    valores = []
+                widget = ttk.Combobox(campos, textvariable=var, values=valores, width=32)
+            else:
+                widget = ttk.Entry(campos, textvariable=var, width=34)
+            widget.grid(row=i, column=1, sticky="ew", pady=4)
+            self.revisao_vars[chave] = var
+            self.revisao_widgets[chave] = widget
+        campos.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            campos,
+            text="Data em DD/MM/AA e hora em HH:MM. A hora é opcional;\n"
+                 "a matrícula só pode conter dígitos.",
+            bootstyle="secondary", justify="left",
+        ).grid(row=len(linhas), column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        derivados = ttk.Labelframe(moldura_form, text="Obtido da base pela matrícula", padding=12)
+        derivados.pack(side="top", fill="x", pady=(10, 0))
+        self.lbl_revisao_nome = ttk.Label(derivados, text="—", wraplength=430, justify="left")
+        self.lbl_revisao_nome.pack(side="top", anchor="w")
+        self.lbl_revisao_setor = ttk.Label(derivados, text="—", bootstyle="secondary", wraplength=430, justify="left")
+        self.lbl_revisao_setor.pack(side="top", anchor="w", pady=(2, 0))
+
+        self.lbl_revisao_resultado = ttk.Label(moldura_form, text="", wraplength=430, justify="left")
+        self.lbl_revisao_resultado.pack(side="top", fill="x", pady=(10, 0))
+
+        acoes = ttk.Frame(moldura_form)
+        acoes.pack(side="bottom", fill="x", pady=(12, 0))
+        self.btn_revisao_anterior = ttk.Button(
+            acoes, text="◀ Anterior", bootstyle="secondary-outline",
+            command=lambda: self._revisao_navegar(-1), width=12,
+        )
+        self.btn_revisao_anterior.pack(side="left")
+        self.btn_revisao_proximo = ttk.Button(
+            acoes, text="Próximo ▶", bootstyle="secondary-outline",
+            command=lambda: self._revisao_navegar(1), width=12,
+        )
+        self.btn_revisao_proximo.pack(side="left", padx=(6, 0))
+        self.btn_revisao_confirmar = ttk.Button(
+            acoes, text="Confirmar correção", bootstyle="success",
+            command=self._revisao_confirmar, width=20,
+        )
+        self.btn_revisao_confirmar.pack(side="right")
+
+        self.lbl_revisao_vazio = ttk.Label(
+            aba, text="", bootstyle="secondary", anchor="center", justify="center",
+        )
+
     # ------------------------------------------------------------------
+    def _montar_aba_avisos(self):
+        aba = ttk.Frame(self.abas, padding=10)
+        self.abas.add(aba, text="Avisos")
+        self._aba_avisos = aba
+
+        ttk.Label(
+            aba,
+            text="Nada aqui bloqueia o processamento — são apontamentos para conferência no papel.",
+            bootstyle="secondary",
+        ).pack(side="top", anchor="w", pady=(0, 8))
+
+        moldura = ttk.Frame(aba)
+        moldura.pack(side="top", fill="both", expand=True)
+        self.tabela_avisos = ttk.Treeview(
+            moldura, columns=("tipo", "pagina", "mensagem"), show="headings",
+        )
+        for coluna, titulo, largura, ancora in [
+            ("tipo", "Tipo", 200, "w"), ("pagina", "Pág.", 60, "center"),
+            ("mensagem", "Detalhe", 780, "w"),
+        ]:
+            self.tabela_avisos.heading(coluna, text=titulo)
+            self.tabela_avisos.column(coluna, width=largura, anchor=ancora, stretch=(coluna == "mensagem"))
+        vsb = ttk.Scrollbar(moldura, orient="vertical", command=self.tabela_avisos.yview)
+        self.tabela_avisos.configure(yscrollcommand=vsb.set)
+        self.tabela_avisos.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        moldura.rowconfigure(0, weight=1)
+        moldura.columnconfigure(0, weight=1)
+
+    # ------------------------------------------------------------------
+    def _montar_rodape(self):
+        rodape = ttk.Frame(self, padding=(12, 0, 12, 10))
+        rodape.pack(side="bottom", fill="x")
+
+        self.lbl_status = ttk.Label(rodape, text="Nenhum arquivo selecionado.")
+        self.lbl_status.pack(side="left")
+
+        self.lbl_bases = ttk.Label(rodape, text=self._data_manager.resumo_status(), bootstyle="secondary")
+        self.lbl_bases.pack(side="right")
+
+    # ==================================================================
+    # Seleção de arquivo
+    # ==================================================================
     def _on_selecionar_imagem(self):
         if self._processando:
             return
@@ -289,6 +602,7 @@ class App(tk.Tk):
         # o acumulado de sessões anteriores (ver _atualizar_status).
         self._total_paginas_lote = None
         self._paginas_processadas_lote = 0
+        self.barra_progresso.config(value=0)
 
     def _finalizar_processamento(self):
         self._processando = False
@@ -298,9 +612,9 @@ class App(tk.Tk):
         if self._registros_exportacao:
             self.btn_salvar.config(state="normal")
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Workers (thread separada -- nunca tocam no Tkinter diretamente)
-    # ------------------------------------------------------------------
+    # ==================================================================
     def _processar_uma_pagina(self, imagem_bgr):
         """Devolve (imagem_processada, registros, erro). Nunca levanta exceção."""
         try:
@@ -407,9 +721,9 @@ class App(tk.Tk):
 
         self._fila_resultados.put(("fim", total))
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Consumo da fila (thread principal)
-    # ------------------------------------------------------------------
+    # ==================================================================
     def _verificar_fila(self):
         try:
             while True:
@@ -461,12 +775,16 @@ class App(tk.Tk):
                 self._paginas_com_erro += 1
                 self._erros_paginas.append({"pagina": numero, "mensagem": erro})
                 self._registros_exportacao.append(self._registro_erro_pagina(numero, erro))
-                self.btn_erros_pag.config(text=f"Erros de página ({self._paginas_com_erro})", state="normal")
             else:
                 if imagem_original is not None and imagem_processada is not None:
                     self._imagem_original = imagem_original
                     self._imagem_processada = imagem_processada
-                    self._exibir_imagens()
+                    # Guarda a foto desta página para a aba de Revisão: sem
+                    # ela, o operador teria de abrir o arquivo por fora para
+                    # conferir o que está escrito no papel.
+                    miniatura = _comprimir_para_miniatura(imagem_original)
+                    if miniatura is not None:
+                        self._miniaturas_por_pagina[numero] = miniatura
                 self._adicionar_registros(numero, registros)
 
                 # PROBLEMA 2: 8 posições esperadas por folha, só como
@@ -475,9 +793,6 @@ class App(tk.Tk):
                 aviso_contagem = verificar_contagem_posicoes(len(registros))
                 if aviso_contagem:
                     self._avisos_contagem.append({"pagina": numero, "mensagem": aviso_contagem})
-                    self.btn_avisos_contagem.config(
-                        text=f"Avisos de contagem ({len(self._avisos_contagem)})", state="normal"
-                    )
 
             # Fase 8 (segurança do lote): só em uma LEVA de verdade (PDF
             # ou seleção múltipla de imagens -- _total_paginas_lote
@@ -491,11 +806,13 @@ class App(tk.Tk):
                 self._autosave_lote()
 
             self._atualizar_status()
+            self._atualizar_avisos()
             return
 
         if tipo == "fim":
             self._finalizar_processamento()
             self._atualizar_status(concluido=True)
+            self._atualizar_painel_revisao()
             return
 
     def _atualizar_status(self, concluido=False):
@@ -520,9 +837,54 @@ class App(tk.Tk):
         prefixo = "Concluído — " if concluido else "Processando... "
         self.lbl_status.config(text=prefixo + " | ".join(partes))
 
-    # ------------------------------------------------------------------
+        self._atualizar_progresso(concluido)
+        self._atualizar_rotulos_abas()
+
+    def _mostrar_progresso(self, visivel):
+        """A barra só ocupa espaço enquanto há lote rodando."""
+        try:
+            if visivel and not self._frame_progresso.winfo_ismapped():
+                self._frame_progresso.pack(side="top", fill="x", before=self.abas)
+            elif not visivel and self._frame_progresso.winfo_ismapped():
+                self._frame_progresso.pack_forget()
+        except Exception:
+            logging.exception("Falha ao alternar a barra de progresso (apenas cosmético)")
+
+    def _atualizar_progresso(self, concluido=False):
+        if concluido or not self._processando:
+            self._mostrar_progresso(False)
+            return
+        self._mostrar_progresso(True)
+        if self._total_paginas_lote:
+            pct = 100.0 * self._paginas_processadas_lote / self._total_paginas_lote
+            self.barra_progresso.config(value=pct)
+            self.lbl_progresso.config(
+                text=f"{self._paginas_processadas_lote}/{self._total_paginas_lote} ({pct:.0f}%)"
+            )
+        else:
+            # Total desconhecido (imagem única): sem denominador não há
+            # percentual honesto a mostrar -- a barra vira indeterminada.
+            self.barra_progresso.config(value=0)
+            self.lbl_progresso.config(text="Processando...")
+
+    def _atualizar_rotulos_abas(self):
+        """Contadores nas abas: onde há trabalho pendente fica visível sem
+        precisar entrar na aba."""
+        try:
+            self.abas.tab(0, text=f"Registros ({len(self._registros_exportacao)})")
+            pendentes = len(self._indices_pendentes_revisao())
+            self.abas.tab(1, text=f"Revisão ({pendentes})" if pendentes else "Revisão")
+            total_avisos = (
+                len(self._erros_paginas) + len(self._avisos_contagem)
+                + len(self._avisos_descarte) + len(self._data_manager.avisos)
+            )
+            self.abas.tab(2, text=f"Avisos ({total_avisos})" if total_avisos else "Avisos")
+        except Exception:
+            logging.exception("Falha ao atualizar os rótulos das abas (apenas cosmético)")
+
+    # ==================================================================
     # Registros -> tabela + lista de exportação
-    # ------------------------------------------------------------------
+    # ==================================================================
     def _registro_erro_pagina(self, numero_pagina, mensagem):
         return {
             "data": "", "hora": "", "matricula": "", "nome": "", "cargo": "", "setor": "",
@@ -562,7 +924,7 @@ class App(tk.Tk):
             # leitura só-dígitos, a célula sai VAZIA em vez de levar o
             # texto cru do OCR ("1954+", "195.4"). Nada se perde -- o texto
             # original continua na coluna técnica de OCR, na Observação e
-            # no aviso "Linhas sem matrícula" logo abaixo.
+            # no aviso "Linhas sem matrícula".
             matricula_normalizada = resultado_matricula.matricula or ""
 
             colaborador = None
@@ -608,7 +970,6 @@ class App(tk.Tk):
             campo_motivo = registro.campos.get("motivo")
 
             conf_matricula = campo_matricula.confianca if campo_matricula else None
-            conf_str = f"{conf_matricula * 100:.0f}%" if conf_matricula is not None else "N/D"
 
             # Aviso explícito de linha sem matrícula identificável. O
             # registro NÃO é descartado (vai para REVISAO com o que tem --
@@ -624,17 +985,6 @@ class App(tk.Tk):
                         + " -- mantida em REVISÃO, nenhuma matrícula foi inventada"
                     ),
                 })
-                self.btn_avisos_descarte.config(
-                    text=f"Linhas sem matrícula ({len(self._avisos_descarte)})", state="normal"
-                )
-
-            rotulo_status = self._rotulo_status(status, observacao)
-
-            self.tabela.insert("", "end", values=(
-                numero_pagina, rotulo_status, data_, hora,
-                matricula_normalizada, nome, setor, motivo, gestor,
-                cargo, conf_str,
-            ))
 
             self._registros_exportacao.append({
                 "data": data_, "hora": hora,
@@ -649,18 +999,104 @@ class App(tk.Tk):
                 "texto_ocr_original": texto_matricula,
             })
 
+        self._sincronizar_tabela_principal()
+        self._atualizar_botao_revisao()
+
+    # ==================================================================
+    # Tabela principal
+    # ==================================================================
+    @staticmethod
+    def _rotulo_status(status: str, observacao: str = "") -> str:
+        """Rótulo curto da coluna Status. A razão (observação) tem coluna
+        própria desde a Fase 10 -- juntar as duas espremia o texto que o
+        operador precisa ler."""
+        if status == "CONFIRMADO":
+            return "✓ CONFIRMADO"
+        if status == "ERRO":
+            return "✗ ERRO"
+        return "⚠ REVISÃO"
+
+    @staticmethod
+    def _tag_status(status: str) -> str:
+        return {"CONFIRMADO": "confirmado", "ERRO": "erro"}.get(status, "revisao")
+
+    def _registro_passa_no_filtro(self, registro) -> bool:
+        filtro = self.filtro_var.get() if hasattr(self, "filtro_var") else "Todos"
+        if filtro == "Confirmados":
+            return registro["status"] == "CONFIRMADO"
+        if filtro == "Em revisão":
+            return registro["status"] == "REVISAO"
+        if filtro == "Com erro":
+            return registro["status"] == "ERRO"
+        return True
+
+    def _sincronizar_tabela_principal(self):
+        """Reconstrói a tabela a partir de self._registros_exportacao,
+        aplicando o filtro atual. É o único ponto que escreve na tabela --
+        assim ela nunca fica fora de sincronia com os dados de exportação
+        (que são a fonte da verdade e o que vai para a planilha)."""
+        self.tabela.delete(*self.tabela.get_children())
+        mostrados = 0
+        for indice, r in enumerate(self._registros_exportacao):
+            if not self._registro_passa_no_filtro(r):
+                continue
+            mostrados += 1
+            conf = r.get("confianca_matricula")
+            conf_str = f"{conf * 100:.0f}%" if isinstance(conf, (int, float)) else "N/D"
+            self.tabela.insert(
+                "", "end", iid=str(indice),
+                values=(
+                    r["pagina_origem"], self._rotulo_status(r["status"]), r["data"], r["hora"],
+                    r["matricula"], r["nome"], r["setor"], r["motivo"], r["gestor"],
+                    r["cargo"], conf_str, r["observacao"],
+                ),
+                tags=(self._tag_status(r["status"]),),
+            )
+        if hasattr(self, "lbl_contagem_tabela"):
+            total = len(self._registros_exportacao)
+            texto = f"{mostrados} de {total} registro(s)" if total else "nenhum registro ainda"
+            self.lbl_contagem_tabela.config(text=texto)
+        self._atualizar_rotulos_abas()
+
+    def _on_duplo_clique_tabela(self, _evento=None):
+        """Duplo clique numa linha em revisão abre exatamente aquela linha
+        na aba de Revisão."""
+        selecao = self.tabela.selection()
+        if not selecao:
+            return
+        try:
+            indice = int(selecao[0])
+        except (TypeError, ValueError):
+            return
+        if self._registros_exportacao[indice]["status"] != "REVISAO":
+            return
+        pendentes = self._indices_pendentes_revisao()
+        if indice in pendentes:
+            self._abrir_revisao(posicao=pendentes.index(indice))
+
+    def _atualizar_botao_revisao(self):
         if self._contador_revisao:
-            self.btn_revisao.config(text=f"Abrir revisão ({self._contador_revisao})", state="normal")
+            self.btn_revisao.config(text=f"Revisar ({self._contador_revisao})", state="normal")
+        else:
+            self.btn_revisao.config(text="Revisar (0)", state="disabled")
 
-    def _exibir_imagens(self):
-        self._photo_original = _para_photoimage(to_display_rgb(self._imagem_original))
-        self._photo_processada = _para_photoimage(to_display_rgb(self._imagem_processada))
-        self.lbl_img_original.configure(image=self._photo_original)
-        self.lbl_img_processada.configure(image=self._photo_processada)
+    # ==================================================================
+    # Avisos
+    # ==================================================================
+    def _atualizar_avisos(self):
+        self.tabela_avisos.delete(*self.tabela_avisos.get_children())
+        for aviso in self._data_manager.avisos:
+            self.tabela_avisos.insert("", "end", values=("Base de dados", "—", aviso))
+        for e in self._erros_paginas:
+            self.tabela_avisos.insert("", "end", values=("Erro de página", e["pagina"], e["mensagem"]))
+        for a in self._avisos_contagem:
+            self.tabela_avisos.insert("", "end", values=("Contagem de posições", a["pagina"], a["mensagem"]))
+        for a in self._avisos_descarte:
+            self.tabela_avisos.insert("", "end", values=("Linha sem matrícula", a["pagina"], a["mensagem"]))
+        self._atualizar_rotulos_abas()
 
-    # ------------------------------------------------------------------
-    # Ações auxiliares
-    # ------------------------------------------------------------------
+    # Mantidos: o fluxo por messagebox continua disponível (e é o que os
+    # testes de regressão exercitam), agora além da aba consolidada.
     def _mostrar_avisos_bases(self):
         if not self._data_manager.avisos:
             return
@@ -686,10 +1122,12 @@ class App(tk.Tk):
         msg = "\n\n".join(f"Página {a['pagina']}: {a['mensagem']}" for a in self._avisos_descarte)
         messagebox.showwarning("Linhas sem matrícula identificável", msg)
 
+    # ==================================================================
+    # Limpar / salvar
+    # ==================================================================
     def _on_limpar(self):
         if self._processando:
             return
-        self.tabela.delete(*self.tabela.get_children())
         self._registros_exportacao = []
         self._erros_paginas = []
         self._avisos_contagem = []
@@ -701,15 +1139,20 @@ class App(tk.Tk):
         self._total_paginas_lote = None
         self._paginas_processadas_lote = 0
         self._proximo_numero_pagina = 1
+        self._miniaturas_por_pagina = {}
+        self._revisao_indices = []
+        self._revisao_posicao = 0
         # O contexto do lote é evidência das folhas que estavam na tabela:
         # limpar os resultados tem de limpá-lo junto, senão o ano de um lote
         # completaria datas do lote seguinte.
         self._contexto_lote = ContextoLote()
         self.btn_salvar.config(state="disabled")
-        self.btn_revisao.config(text="Abrir revisão (0)", state="disabled")
-        self.btn_erros_pag.config(text="Erros de página (0)", state="disabled")
-        self.btn_avisos_contagem.config(text="Avisos de contagem (0)", state="disabled")
-        self.btn_avisos_descarte.config(text="Linhas sem matrícula (0)", state="disabled")
+        self._atualizar_botao_revisao()
+        self._sincronizar_tabela_principal()
+        self._atualizar_avisos()
+        self._atualizar_painel_revisao()
+        self.barra_progresso.config(value=0)
+        self.lbl_progresso.config(text="")
         self.lbl_status.config(text="Resultados limpos. Nenhum arquivo selecionado.")
 
     @staticmethod
@@ -783,207 +1226,297 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # Janela de revisão manual
-    # ------------------------------------------------------------------
-    def _abrir_revisao(self):
-        # Fase 7 (PROBLEMA E): só registros REVISAO entram aqui -- linhas
-        # ERRO (falha de página inteira: OCR não rodou, PDF não abriu
-        # etc.) não têm nenhum campo de verdade para corrigir, e permitir
-        # "confirmar" uma delas digitando valores do zero seria inventar
-        # dado sem nenhuma evidência de OCR por trás. Página com ERRO
-        # precisa ser reprocessada (nova foto/novo PDF), não corrigida
-        # campo a campo -- ver botão "Erros de página". Isso também
-        # elimina a dessincronia que existia entre este contador e
-        # `self._contador_revisao` (que nunca contava ERRO).
-        pendentes = [(i, r) for i, r in enumerate(self._registros_exportacao) if r["status"] == "REVISAO"]
+    # ==================================================================
+    # REVISÃO (aba integrada)
+    #
+    # A API abaixo (_indices_pendentes_revisao / _revisao_ir_para /
+    # _revisao_confirmar) é o contrato programático da revisão: é por ela
+    # que o teste de integração dirige a aba, em vez de caçar widgets na
+    # árvore do Tk. Isso mantém o teste verificando COMPORTAMENTO (o que
+    # pode ou não virar CONFIRMADO) em vez de layout.
+    # ==================================================================
+    def _indices_pendentes_revisao(self):
+        """
+        Índices, em `_registros_exportacao`, das linhas que a revisão
+        manual pode tratar -- na ordem física da folha.
+
+        Fase 7 (PROBLEMA E): SÓ status REVISAO. Linhas ERRO (falha de
+        página inteira: OCR não rodou, PDF não abriu) não têm nenhum campo
+        de verdade para corrigir, e deixar o operador digitar valores do
+        zero seria inventar dado sem nenhuma evidência de OCR por trás.
+        Página com ERRO precisa ser reprocessada, não corrigida campo a
+        campo (ver aba Avisos).
+        """
+        return [i for i, r in enumerate(self._registros_exportacao) if r["status"] == "REVISAO"]
+
+    def _abrir_revisao(self, posicao=None):
+        """Leva para a aba de Revisão (antes da Fase 10 isto abria uma
+        janela Toplevel separada)."""
+        pendentes = self._indices_pendentes_revisao()
         if not pendentes:
             if self._erros_paginas:
                 messagebox.showinfo(
                     "Revisão",
                     "Não há registros em revisão manual.\n\n"
                     f"Há {len(self._erros_paginas)} página(s) com ERRO de processamento — "
-                    "veja o botão \"Erros de página\" (essas páginas precisam ser "
+                    "veja a aba \"Avisos\" (essas páginas precisam ser "
                     "reprocessadas, não corrigidas campo a campo).",
                 )
             else:
                 messagebox.showinfo("Revisão", "Não há registros pendentes de revisão.")
             return
 
-        janela = tk.Toplevel(self)
-        janela.title(f"Revisão manual ({len(pendentes)} registro(s))")
-        janela.geometry("780x480")
+        if posicao is not None:
+            self._revisao_posicao = max(0, min(posicao, len(pendentes) - 1))
+        self._atualizar_painel_revisao()
+        try:
+            self.abas.select(self._aba_revisao)
+        except Exception:
+            logging.exception("Falha ao selecionar a aba de Revisão")
 
-        colunas = ("pagina", "matricula", "gestor", "motivo", "observacao")
-        tabela = ttk.Treeview(janela, columns=colunas, show="headings", height=12)
-        for c, titulo, w in [("pagina", "Pág.", 50), ("matricula", "Matrícula", 90),
-                              ("gestor", "Responsável", 140), ("motivo", "Motivo", 140),
-                              ("observacao", "Motivo da revisão", 260)]:
-            tabela.heading(c, text=titulo)
-            tabela.column(c, width=w, anchor="center")
-        tabela.pack(fill="both", expand=True, padx=10, pady=10)
+    def _revisao_ir_para(self, posicao):
+        """Posiciona a revisão no n-ésimo pendente e recarrega o
+        formulário. Usado pela navegação e pelo teste de integração."""
+        pendentes = self._indices_pendentes_revisao()
+        if not pendentes:
+            return
+        self._revisao_posicao = max(0, min(int(posicao), len(pendentes) - 1))
+        self._atualizar_painel_revisao()
 
-        indices_por_item = {}
-        for indice_original, registro in pendentes:
-            item_id = tabela.insert("", "end", values=(
-                registro["pagina_origem"], registro["matricula"], registro["gestor"],
-                registro["motivo"], registro["observacao"],
-            ))
-            indices_por_item[item_id] = indice_original
+    def _revisao_navegar(self, passo):
+        pendentes = self._indices_pendentes_revisao()
+        if not pendentes:
+            return
+        self._revisao_ir_para((self._revisao_posicao + passo) % len(pendentes))
 
-        frame_edicao = ttk.LabelFrame(janela, text="Corrigir registro selecionado", padding=10)
-        frame_edicao.pack(fill="x", padx=10, pady=(0, 10))
+    def _revisao_registro_atual(self):
+        pendentes = self._indices_pendentes_revisao()
+        if not pendentes:
+            return None, None
+        posicao = max(0, min(self._revisao_posicao, len(pendentes) - 1))
+        indice = pendentes[posicao]
+        return indice, self._registros_exportacao[indice]
 
-        campos_edicao = {}
-        for i, (chave, rotulo) in enumerate([("matricula", "Matrícula"), ("gestor", "Responsável"), ("motivo", "Motivo")]):
-            ttk.Label(frame_edicao, text=rotulo).grid(row=0, column=i * 2, sticky="w", padx=(0, 4))
-            var = tk.StringVar()
-            ttk.Entry(frame_edicao, textvariable=var, width=18).grid(row=0, column=i * 2 + 1, padx=(0, 10))
-            campos_edicao[chave] = var
+    def _atualizar_painel_revisao(self):
+        """Recarrega o formulário e a foto a partir do registro atual."""
+        pendentes = self._indices_pendentes_revisao()
+        habilitado = "normal" if pendentes else "disabled"
+        for widget in list(self.revisao_widgets.values()) + [
+            self.btn_revisao_anterior, self.btn_revisao_proximo, self.btn_revisao_confirmar
+        ]:
+            try:
+                widget.config(state=habilitado)
+            except Exception:
+                pass
 
-        def _ao_selecionar(_evt=None):
-            sel = tabela.selection()
-            if not sel:
-                return
-            registro = self._registros_exportacao[indices_por_item[sel[0]]]
-            campos_edicao["matricula"].set(registro["matricula"])
-            campos_edicao["gestor"].set(registro["gestor"])
-            campos_edicao["motivo"].set(registro["motivo"])
+        if not pendentes:
+            for var in self.revisao_vars.values():
+                var.set("")
+            self.lbl_revisao_posicao.config(text="Nenhum registro pendente de revisão")
+            self.lbl_revisao_motivo.config(text="")
+            self.lbl_revisao_nome.config(text="—")
+            self.lbl_revisao_setor.config(text="")
+            self.lbl_revisao_resultado.config(text="")
+            self.lbl_pagina_foto.config(text="")
+            self.canvas_foto.delete("all")
+            self._foto_revisao = None
+            self._atualizar_rotulos_abas()
+            return
 
-        tabela.bind("<<TreeviewSelect>>", _ao_selecionar)
+        _indice, registro = self._revisao_registro_atual()
+        posicao = self._revisao_posicao + 1
+        self.lbl_revisao_posicao.config(
+            text=f"Pendente {posicao} de {len(pendentes)}  ·  página {registro['pagina_origem']}"
+        )
+        self.lbl_revisao_motivo.config(text=registro.get("observacao") or "")
+        for chave in ("data", "hora", "matricula", "motivo", "gestor"):
+            self.revisao_vars[chave].set(registro.get(chave) or "")
+        self._atualizar_derivados_revisao(registro)
+        self.lbl_revisao_resultado.config(text="")
+        self._mostrar_foto_pagina(registro["pagina_origem"])
+        self._atualizar_rotulos_abas()
 
-        def _confirmar():
-            # Fase 7 (PROBLEMAS C/D — segurança contra falso CONFIRMADO):
-            # esta função ANTES marcava CONFIRMADO incondicionalmente, só
-            # por o operador ter clicado o botão, sem checar se a correção
-            # realmente resolveu o problema, e sem nunca reconsultar a
-            # base de colaboradores pela matrícula corrigida (Nome/Setor/
-            # Cargo ficavam travados em "(não encontrado)" mesmo com a
-            # matrícula certa). Agora reconstrói um Registro sintético com
-            # os valores digitados e roda a MESMA validação do fluxo
-            # automático (validacao.classificar_registro) -- reutiliza a
-            # regra existente, não cria nenhuma nova. Confiança 1.0 nos
-            # campos digitados: foram verificados por uma pessoa, deixaram
-            # de ser uma hipótese de OCR (não é um valor inventado).
-            sel = tabela.selection()
-            if not sel:
-                messagebox.showwarning("Revisão", "Selecione um registro na lista.")
-                return
-            item_id = sel[0]
-            indice = indices_por_item[item_id]
-            registro = self._registros_exportacao[indice]
+    def _atualizar_derivados_revisao(self, registro):
+        nome = registro.get("nome") or "—"
+        setor = registro.get("setor") or ""
+        cargo = registro.get("cargo") or ""
+        self.lbl_revisao_nome.config(text=nome)
+        detalhe = " · ".join(p for p in (setor, cargo) if p and p != NAO_ENCONTRADO)
+        self.lbl_revisao_setor.config(text=detalhe or "")
 
-            matricula_digitada = campos_edicao["matricula"].get().strip()
-            gestor_digitado = campos_edicao["gestor"].get().strip()
-            motivo_digitado = campos_edicao["motivo"].get().strip()
-            # Mesmo tratamento do fluxo automático: a matrícula final só
-            # pode conter dígitos, mesmo vinda de digitação manual.
-            matricula_normalizada = normalizar_matricula(matricula_digitada) if matricula_digitada else ""
-            resultado_matricula = resolver_matricula(
-                matricula_normalizada,
-                existe_na_base=(
-                    (lambda m: self._data_manager.buscar_colaborador(m) is not None)
-                    if self._data_manager.colaboradores_disponivel else None
-                ),
+    # ------------------------------------------------------------------
+    # Foto da folha
+    # ------------------------------------------------------------------
+    def _mostrar_foto_pagina(self, numero_pagina):
+        self.canvas_foto.delete("all")
+        self._foto_revisao = None
+        dados = self._miniaturas_por_pagina.get(numero_pagina)
+        if dados is None:
+            self.lbl_pagina_foto.config(text="(foto indisponível)")
+            self.canvas_foto.create_text(
+                12, 12, anchor="nw", fill="#868e96",
+                text="A foto desta página não está disponível\n"
+                     "(página com erro, ou resultados carregados sem imagem).",
             )
-            matricula_normalizada = resultado_matricula.matricula or ""
+            return
+        self.lbl_pagina_foto.config(text=f"página {numero_pagina}")
+        self._imagem_pil_revisao = Image.open(io.BytesIO(dados))
+        self._ajustar_zoom_para_caber()
 
-            campos_sinteticos = {}
-            if registro.get("data"):
-                campos_sinteticos["data"] = CampoOcr(texto=registro["data"], confianca=1.0, box=None)
-            if registro.get("hora"):
-                campos_sinteticos["hora"] = CampoOcr(texto=registro["hora"], confianca=1.0, box=None)
-            if matricula_normalizada:
-                campos_sinteticos["matricula"] = CampoOcr(texto=matricula_normalizada, confianca=1.0, box=None)
-            if gestor_digitado:
-                campos_sinteticos["gestor"] = CampoOcr(texto=gestor_digitado, confianca=1.0, box=None)
-            if motivo_digitado:
-                campos_sinteticos["motivo"] = CampoOcr(texto=motivo_digitado, confianca=1.0, box=None)
-            registro_sintetico = Registro(indice=0, campos=campos_sinteticos)
+    def _redesenhar_foto(self):
+        imagem = getattr(self, "_imagem_pil_revisao", None)
+        if imagem is None:
+            return
+        largura = max(1, int(imagem.width * self._revisao_zoom))
+        altura = max(1, int(imagem.height * self._revisao_zoom))
+        redimensionada = imagem.resize((largura, altura), Image.LANCZOS)
+        self._foto_revisao = ImageTk.PhotoImage(redimensionada)
+        self.canvas_foto.delete("all")
+        self.canvas_foto.create_image(0, 0, anchor="nw", image=self._foto_revisao)
+        self.canvas_foto.config(scrollregion=(0, 0, largura, altura))
 
-            # PROBLEMA C: re-consulta a base pela matrícula corrigida --
-            # Nome/Setor/Cargo têm que refletir a matrícula certa, nunca
-            # ficar mostrando "(não encontrado)" para um registro que
-            # acabou de ser confirmado com uma matrícula válida.
-            colaborador = (
-                self._data_manager.buscar_colaborador(matricula_normalizada) if matricula_normalizada else None
+    def _ajustar_zoom(self, fator):
+        if getattr(self, "_imagem_pil_revisao", None) is None:
+            return
+        self._revisao_zoom = max(0.1, min(4.0, self._revisao_zoom * fator))
+        self._redesenhar_foto()
+
+    def _ajustar_zoom_para_caber(self):
+        imagem = getattr(self, "_imagem_pil_revisao", None)
+        if imagem is None:
+            return
+        self.canvas_foto.update_idletasks()
+        largura_disponivel = max(1, self.canvas_foto.winfo_width())
+        altura_disponivel = max(1, self.canvas_foto.winfo_height())
+        # Antes de a janela ser desenhada, winfo_* devolve 1 -- nesse caso
+        # um zoom "para caber" seria absurdo; usa 1.0 e deixa o operador
+        # ajustar (ou o próximo clique em "Ajustar" já pega o tamanho real).
+        if largura_disponivel <= 1 or altura_disponivel <= 1:
+            self._revisao_zoom = 1.0
+        else:
+            self._revisao_zoom = min(
+                largura_disponivel / imagem.width, altura_disponivel / imagem.height, 1.0
+            )
+        self._redesenhar_foto()
+
+    # ------------------------------------------------------------------
+    # Confirmação da correção
+    # ------------------------------------------------------------------
+    def _revisao_confirmar(self):
+        """
+        Fase 7 (PROBLEMAS C/D — segurança contra falso CONFIRMADO): esta
+        função NÃO marca CONFIRMADO por o operador ter clicado o botão.
+        Ela reconstrói um Registro com os valores digitados e roda a MESMA
+        validação do fluxo automático (`classificar_registro`) -- reutiliza
+        a regra existente, não cria nenhuma nova. Confiança 1.0 nos campos
+        digitados: foram verificados por uma pessoa, deixaram de ser uma
+        hipótese de OCR (não é um valor inventado).
+
+        Fase 10: DATA e HORA passaram a ser editáveis aqui. Antes elas
+        vinham fixas do registro, então uma linha barrada pela data era
+        impossível de resolver dentro do programa.
+        """
+        indice, registro = self._revisao_registro_atual()
+        if registro is None:
+            return
+
+        data_digitada = self.revisao_vars["data"].get().strip()
+        hora_digitada = self.revisao_vars["hora"].get().strip()
+        matricula_digitada = self.revisao_vars["matricula"].get().strip()
+        gestor_digitado = self.revisao_vars["gestor"].get().strip()
+        motivo_digitado = self.revisao_vars["motivo"].get().strip()
+
+        # Mesmo tratamento do fluxo automático: a matrícula final só
+        # pode conter dígitos, mesmo vinda de digitação manual.
+        matricula_normalizada = normalizar_matricula(matricula_digitada) if matricula_digitada else ""
+        resultado_matricula = resolver_matricula(
+            matricula_normalizada,
+            existe_na_base=(
+                (lambda m: self._data_manager.buscar_colaborador(m) is not None)
+                if self._data_manager.colaboradores_disponivel else None
+            ),
+        )
+        matricula_normalizada = resultado_matricula.matricula or ""
+
+        campos_sinteticos = {}
+        if data_digitada:
+            campos_sinteticos["data"] = CampoOcr(texto=data_digitada, confianca=1.0, box=None)
+        if hora_digitada:
+            campos_sinteticos["hora"] = CampoOcr(texto=hora_digitada, confianca=1.0, box=None)
+        if matricula_normalizada:
+            campos_sinteticos["matricula"] = CampoOcr(texto=matricula_normalizada, confianca=1.0, box=None)
+        if gestor_digitado:
+            campos_sinteticos["gestor"] = CampoOcr(texto=gestor_digitado, confianca=1.0, box=None)
+        if motivo_digitado:
+            campos_sinteticos["motivo"] = CampoOcr(texto=motivo_digitado, confianca=1.0, box=None)
+        registro_sintetico = Registro(indice=0, campos=campos_sinteticos)
+
+        # PROBLEMA C: re-consulta a base pela matrícula corrigida --
+        # Nome/Setor/Cargo têm que refletir a matrícula certa, nunca
+        # ficar mostrando "(não encontrado)" para um registro que
+        # acabou de ser confirmado com uma matrícula válida.
+        colaborador = (
+            self._data_manager.buscar_colaborador(matricula_normalizada) if matricula_normalizada else None
+        )
+
+        resultado = classificar_registro(
+            registro_sintetico, colaborador, self._data_manager,
+            resultado_matricula=resultado_matricula,
+            contexto_lote=self._contexto_lote,
+        )
+
+        registro["matricula"] = matricula_normalizada
+        registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
+        registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
+        registro["setor"] = colaborador["setor"] if colaborador else NAO_ENCONTRADO
+        registro["data"] = resultado.data_confirmada or ""
+        registro["hora"] = resultado.hora_confirmada or ""
+        registro["gestor"] = resultado.gestor_confirmado or gestor_digitado
+        registro["motivo"] = resultado.motivo_confirmado or motivo_digitado
+        if matricula_normalizada:
+            registro["confianca_matricula"] = 1.0
+        if gestor_digitado:
+            registro["confianca_gestor"] = 1.0
+        if motivo_digitado:
+            registro["confianca_motivo"] = 1.0
+
+        status_anterior = registro["status"]
+        registro["status"] = resultado.status
+        if resultado.status == "CONFIRMADO":
+            registro["observacao"] = (
+                "corrigido manualmente" if not resultado.observacao
+                else f"corrigido manualmente; {resultado.observacao}"
+            )
+        else:
+            registro["observacao"] = f"revisão manual incompleta -- {resultado.observacao}"
+
+        if resultado.status == "CONFIRMADO" and status_anterior != "CONFIRMADO":
+            self._contador_revisao -= 1
+            self._contador_confirmados += 1
+
+        self._sincronizar_tabela_principal()
+        self._atualizar_botao_revisao()
+        self._atualizar_status(concluido=not self._processando)
+
+        if resultado.status == "CONFIRMADO":
+            # A linha saiu da lista de pendentes: a posição atual passa a
+            # apontar para a PRÓXIMA pendente sozinha (a lista encolheu),
+            # que é o comportamento desejado ao revisar em sequência.
+            pendentes = self._indices_pendentes_revisao()
+            if pendentes:
+                self._revisao_posicao = min(self._revisao_posicao, len(pendentes) - 1)
+            self._atualizar_painel_revisao()
+            if not pendentes:
+                messagebox.showinfo("Revisão", "Todos os registros pendentes foram revisados.")
+        else:
+            # Ainda não pôde ser confirmado -- permanece na lista, com a
+            # observação atualizada, em vez de desaparecer como se
+            # tivesse sido resolvido.
+            self._atualizar_painel_revisao()
+            self.lbl_revisao_resultado.config(
+                text=f"Ainda não é possível confirmar: {resultado.observacao}",
+                bootstyle="danger",
             )
 
-            resultado = classificar_registro(
-                registro_sintetico, colaborador, self._data_manager,
-                resultado_matricula=resultado_matricula,
-                contexto_lote=self._contexto_lote,
-            )
-
-            registro["matricula"] = matricula_normalizada
-            registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
-            registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
-            registro["setor"] = colaborador["setor"] if colaborador else NAO_ENCONTRADO
-            registro["hora"] = resultado.hora_confirmada or ""
-            registro["gestor"] = resultado.gestor_confirmado or gestor_digitado
-            registro["motivo"] = resultado.motivo_confirmado or motivo_digitado
-            if matricula_normalizada:
-                registro["confianca_matricula"] = 1.0
-            if gestor_digitado:
-                registro["confianca_gestor"] = 1.0
-            if motivo_digitado:
-                registro["confianca_motivo"] = 1.0
-
-            status_anterior = registro["status"]
-            registro["status"] = resultado.status
-            if resultado.status == "CONFIRMADO":
-                registro["observacao"] = (
-                    "corrigido manualmente" if not resultado.observacao
-                    else f"corrigido manualmente; {resultado.observacao}"
-                )
-            else:
-                registro["observacao"] = f"revisão manual incompleta -- {resultado.observacao}"
-
-            self._sincronizar_tabela_principal()
-
-            if resultado.status == "CONFIRMADO":
-                if status_anterior != "CONFIRMADO":
-                    self._contador_revisao -= 1
-                    self._contador_confirmados += 1
-                tabela.delete(item_id)
-                del indices_por_item[item_id]
-                self.btn_revisao.config(text=f"Abrir revisão ({self._contador_revisao})",
-                                         state="normal" if self._contador_revisao else "disabled")
-                if not indices_por_item:
-                    janela.destroy()
-            else:
-                # Ainda não pôde ser confirmado (ex.: o problema real era
-                # a DATA, que este formulário não edita) -- permanece na
-                # lista de pendentes, com a observação atualizada, em vez
-                # de desaparecer como se tivesse sido resolvido.
-                tabela.item(item_id, values=(
-                    registro["pagina_origem"], registro["matricula"], registro["gestor"],
-                    registro["motivo"], registro["observacao"],
-                ))
-                messagebox.showinfo(
-                    "Revisão", f"Ainda não é possível confirmar este registro:\n\n{resultado.observacao}"
-                )
-
-            self._atualizar_status(concluido=True)
-
-        ttk.Button(frame_edicao, text="Confirmar correção", command=_confirmar).grid(row=0, column=6, padx=(10, 0))
-
-    @staticmethod
-    def _rotulo_status(status: str, observacao: str) -> str:
-        if status == "CONFIRMADO":
-            return "✓ CONFIRMADO"
-        if status == "ERRO":
-            return "✗ ERRO — " + observacao
-        return "⚠ REVISÃO — " + observacao
-
-    def _sincronizar_tabela_principal(self):
-        """Reconstrói a tabela principal a partir de self._registros_exportacao (após correção manual)."""
-        self.tabela.delete(*self.tabela.get_children())
-        for r in self._registros_exportacao:
-            rotulo_status = self._rotulo_status(r["status"], r["observacao"])
-            conf = r.get("confianca_matricula")
-            conf_str = f"{conf * 100:.0f}%" if isinstance(conf, (int, float)) else "N/D"
-            self.tabela.insert("", "end", values=(
-                r["pagina_origem"], rotulo_status, r["data"], r["hora"], r["matricula"],
-                r["nome"], r["setor"], r["motivo"], r["gestor"], r["cargo"], conf_str,
-            ))
+    # Nome anterior mantido: o fluxo de correção manual é o mesmo.
+    _confirmar = _revisao_confirmar
