@@ -704,15 +704,30 @@ class App(tb.Window):
             return
         self._fila_resultados.put(("total", total))
 
+        nome_pdf = os.path.basename(caminho_pdf)
         try:
             for pagina_pdf in pdf_reader.iterar_paginas(caminho_pdf):
                 numero = self._proximo_numero_pagina
+                # Fase 14 (rastreabilidade): DOIS números coexistem e não
+                # podem ser confundidos -- `numero` é a posição da folha no
+                # lote (o que vai para a coluna Página da planilha, e o que
+                # preserva a ordem física), e `pagina_pdf.numero` é a página
+                # DENTRO deste arquivo. Eles só coincidem quando o PDF é a
+                # primeira coisa processada na sessão; a partir do segundo
+                # arquivo divergem. A mensagem antes citava só o número
+                # interno, então o operador via "página 3" numa linha
+                # rotulada "página 8" e não tinha como saber qual folha
+                # conferir. Agora a origem vem nomeada e completa.
+                origem = f"página {pagina_pdf.numero} de '{nome_pdf}'"
                 if pagina_pdf.erro:
                     self._fila_resultados.put(
-                        ("pagina", numero, None, None, [], f"Falha ao renderizar página {pagina_pdf.numero}: {pagina_pdf.erro}")
+                        ("pagina", numero, None, None, [],
+                         f"Falha ao renderizar a {origem}: {pagina_pdf.erro}")
                     )
                 else:
                     imagem_processada, registros, erro = self._processar_uma_pagina(pagina_pdf.imagem)
+                    if erro:
+                        erro = f"{origem}: {erro}"
                     self._fila_resultados.put(("pagina", numero, pagina_pdf.imagem, imagem_processada, registros, erro))
                 self._proximo_numero_pagina = numero + 1
         except Exception as exc:

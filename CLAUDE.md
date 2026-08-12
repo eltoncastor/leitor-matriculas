@@ -30,6 +30,7 @@ python teste\teste_correspondencia_aproximada.py  # fuzzy matching for MOTIVO/RE
 python teste\teste_extracao_fase1.py           # Fase 1 precision fixes: printed-text exclusion, expected-count check, DATA+HORA merge-split
 python teste\teste_recuperacao_contextual.py   # Fase 9: família HORÁRIO NEGADO, código GR, contexto do lote (ano), hora/matrícula
 python teste\teste_integridade_captura.py      # Fase 12: campo perdido pelo OCR não pode sair CONFIRMADO em silêncio
+python teste\teste_pdf_robustez.py             # Fase 14: retenção no yield, isolamento de falha por página, rastreabilidade
 ```
 
 There is no lint/format tooling configured. PaddleOCR downloads its models on first run (needs internet once; offline after that).
@@ -132,6 +133,49 @@ L2: data='14.0.4.26'  hora=AUSENTE  matricula='26319' ...
   - **A revisão manual não vira porta dos fundos**: `_revisao_confirmar` reconstrói o `Registro` sintético **com o `nao_associados` original**, preservado no dict de exportação sob `ocr_nao_associados` (chave técnica; o `xlsx_exporter` itera sobre as suas próprias `COLUNAS` com `.get()` e a ignora). Sem isso bastava abrir a revisão e clicar em confirmar para reverter o bloqueio. Não prende o operador: a checagem só dispara se o campo continuar VAZIO — digitou a hora que está no papel, confirma.
   Novo teste: `teste/teste_integridade_captura.py` — o caso 26319, os dois cenários de hora (ausente × perdida) tratados como **não equivalentes**, as formas reais em que o vestígio aparece nas folhas (`'07:4'`, `'11:0s Card'`, `'1108 fernamenta'`), os campos obrigatórios continuando a bloquear, a anotação interna não virando evidência, e a revisão manual sem atalho.
   Validação do sinal contra o lote real (5 folhas, 40 liberações): as **3** linhas que perderam a hora têm evidência; as **2** cuja matrícula está realmente em branco no papel não têm nenhuma. O sinal separa os dois casos sem confundi-los. Limitação conhecida: onde o OCR não deixou vestígio algum, a perda é indetectável por este caminho — e um valor **errado** (não perdido) continua fora do alcance desta fase, que não toca em OCR.
+
+**Fase 13 — benchmark de resolução para OCR**: `LADO_MAXIMO_PADRAO` (`ocr/image_processor.py` — o redimensionamento controlado aplicado antes do OCR, preservando a proporção) estava em `3500`, valor não revisitado desde antes da Fase 9. O benchmark rodou as mesmas 5 folhas reais (o lote de validação já usado nas Fases 9/11/12) em 5 resoluções, com a resolução como única variável:
+  - abaixo de `2339` o resultado se degrada em saltos, não gradualmente, e sempre em silêncio — aparece como dado errado **CONFIRMADO**, não como erro: `2000` inventou uma linha fantasma (41 registros) e leu `29306` como `99306`; `1800` trocou uma matrícula ambígua (`28977`→`28972`), convertendo uma REVISAO conservadora em CONFIRMADO; `1600` confirmou o RESPONSÁVEL ERRADO (`GRL` lido como `GR4`);
+  - `2339` — a mesma resolução em que o PDF já chega ao OCR (`pdf_reader` renderiza a 200 DPI, o que dá `2339x1317` nestas folhas) — foi a menor resolução que passou em todos os critérios de segurança, logo a escolhida;
+  - alinhar o fluxo de IMAGENS (que estava em `3500`, acima do baseline do próprio PDF) a `2339` rendeu, medido nas mesmas 5 folhas: tempo `66,0`→`40,3` s/página (**-39%**); RAM `5272`→`2633` MB de pico (**-50%**); acerto `17`→`19` CONFIRMADO corretos, com o MESMO único defeito residual (ver abaixo). A `3500` o OCR perdia campos que a `2339` ele lê (uma matrícula e duas horas) e a Fase 12 corretamente barrava esses registros — daí os 2 CONFIRMADO a menos a `3500`, por segurança, não por erro;
+  - mudança mínima: só a constante mudou (`3500`→`2339`), continuando configurável por chamada (`lado_maximo=`) para reverter; verificado que as duas rotas até `2339` produzem arrays byte a byte idênticos e que uma página de PDF não sofre segunda redução. OCR, parser, normalização, validação, bases e interface ficaram intocados.
+  Novo teste: `teste/teste_resolucao_ocr.py` — trava mecânica do valor aprovado e do contrato de redimensionamento (proporção preservada, imagem menor que o limite não é ampliada, PDF não sofre segunda redução, limite continua configurável por chamada); não mede qualidade de OCR, que exige as folhas reais.
+  **Limitação residual desta fase**: a matrícula `27938` continua com a HORA lida como `14:59` em vez de `11:59` — único defeito entre os 19 CONFIRMADO, presente tanto antes quanto depois da mudança de resolução. As resoluções mais baixas (`2000`, `1600`) chegaram a acertar essa célula especificamente, o que indica sensibilidade de escala do OCR nesse caso pontual (não um erro sistemático de lógica) — mas essas mesmas resoluções erraram outros campos de forma mais grave (ver acima), então não compensam a troca. Corrigir esse caso exigiria mexer no OCR, fora do escopo desta fase.
+  Suíte: 18/18 arquivos de teste aprovados; XLSX validada na resolução vencedora. Commit `544fc9b` (`perf: alinha a resolucao do fluxo de imagens ao baseline medido`), tag `v0.3.2-resolucao`.
+
+**Fase 14 — robustez e desempenho do PDF**: fase de investigação primeiro, implementação depois. A medição usou o PDF real de 5 páginas e um PDF sintético de 50 (as mesmas 5 folhas repetidas 10×, só para ver tendência de memória — nunca para medir precisão), isolando a camada de PDF da camada de OCR.
+  - **Processamento incremental: já estava correto — nada foi alterado.** Em 50 páginas a memória do `pdf_reader` **estabiliza em ~322 MB** (`+0,18 MB/página`, com platô a partir da 5ª página) e o tempo é constante em `147 ms/página`. Ou seja, o crescimento de `~33 MB/página` medido na Fase 11 **não vem desta camada** — vem do OCR, e fica para a Fase 19. Não se mexeu no gerador para "otimizar" o que a medição mostrou já funcionar.
+  - **Retenção durante o `yield` (corrigido, `ocr/pdf_reader.py`)**: um gerador fica *pausado* no `yield` enquanto quem consome trabalha — e aqui quem consome roda o OCR da página, dezenas de segundos. Inspecionando `gi_frame.f_locals` com o gerador pausado, mediu-se **26,4 MB vivos por página**: `pixmap` (8,8 MB), `imagem_rgb` (view sobre o buffer do pixmap, que o mantém vivo) e `imagem_bgr` (a cópia entregue). Soltar `pixmap`/`imagem_rgb`/`pagina` antes do `yield` (e `imagem_bgr` depois dele) baixou para **8,8 MB** — o que resta é a própria imagem que o consumidor está usando. Pico do lote de 50 páginas: `387 → 370 MB`. Nenhuma mudança de resultado: `imagem_bgr` sempre foi uma cópia própria, não uma view.
+  - **Rastreabilidade (corrigido, `ui/app.py`)**: coexistem DOIS números de página — `_proximo_numero_pagina` (posição da folha no lote, o que vai para a coluna Página e preserva a ordem física) e `PaginaPdf.numero` (posição dentro daquele arquivo). Eles só coincidem quando o PDF é a primeira coisa da sessão. A mensagem de erro citava apenas o número interno, então o operador via *"Falha ao renderizar página 3"* numa linha rotulada *"página 8"*, sem saber qual folha conferir. Agora a origem sai nomeada e completa (`"página 3 de 'mes.pdf'"`), e o mesmo prefixo passou a acompanhar também as falhas de OCR/parser da página, não só as de renderização.
+  - **Isolamento de falhas: já correto, agora coberto por teste.** O gerador devolve todas as páginas, marca só a que falhou (`imagem=None`, `erro` preservado sem ser engolido), não abre furo na numeração e continua o lote. Falhas de documento inteiro (arquivo ausente, arquivo que não é PDF) continuam levantando exceção, como devem.
+  - **Achados registrados, sem correção (fora do escopo desta fase)**: (1) o PyMuPDF **é resiliente demais para que o caminho de erro por página seja exercitado na prática** — uma imagem embutida destruída resulta numa **página em branco sem exceção nenhuma**, que segue como página "bem-sucedida" com ZERO registros; isso não gera CONFIRMADO algum (não há linha) e é sinalizado pelo aviso de contagem (`esperava 8 posições, foram reconhecidas 0`), mas não vira linha de ERRO; (2) um PDF **truncado é recuperado** pelo PyMuPDF, que reconstrói as páginas que consegue em vez de falhar. Os dois comportamentos estão travados em teste para que uma troca de versão do PyMuPDF não os altere despercebidamente.
+  - **Nenhum ganho de tempo é reivindicado**: a renderização é `0,5%` do tempo total (o OCR é `97%`), então a correção de memória não muda o relógio. Resultado nas 5 folhas reais: **40 registros, 19 CONFIRMADO, 21 REVISAO — zero diferença campo a campo** contra a execução anterior, ordem física idêntica, XLSX validada.
+  Novo teste: `teste/teste_pdf_robustez.py` (8 blocos, PDFs sintéticos, sem OCR).
+
+## Roadmap
+
+Visão consolidada das fases do projeto — concluídas, futuras e os princípios que orientam a sequência. Descrições detalhadas das fases já concluídas estão na seção Architecture, acima; esta seção dá o mapa geral, sem repetir esses detalhes.
+
+**Concluídas**
+- Fase 11 — Medição real do sistema
+- Fase 12 — Segurança da confirmação e detecção de campos perdidos (detalhes na seção Architecture)
+- Fase 13 — Benchmark de resolução para OCR (concluída com `v0.3.2-resolucao`; detalhes na seção Architecture)
+- Fase 14 — Robustez e desempenho do PDF (detalhes na seção Architecture)
+
+**Próximas**
+- Fase 15 — Interpretação estrutural da folha: usar geometria e posição do OCR para identificar melhor linhas, colunas, campos e relações espaciais; não é ROI (ver Fase 6, descartada); não é segunda passada de OCR.
+- Fase 16 — Consistência contextual: usar outras linhas da mesma folha e do mesmo lote como evidência; detectar inconsistências; identificar padrões; recuperar somente quando houver evidência suficiente; destacar o que destoa; não realizar correções arbitrárias.
+- Fase 17 — Motor de evidências: estruturar explicitamente o que sustenta cada valor (OCR original, valor normalizado, correspondência com a base, contexto, posição na folha, regras aplicadas, fatores favoráveis e fatores de dúvida); decisões explicáveis, sem score arbitrário.
+- Fase 18 — Revisão inteligente: mostrar qual campo causou a dúvida; explicar por que entrou em `REVISAO`; mostrar valor original do OCR; mostrar normalizações; oferecer sugestões somente quando forem seguras.
+- Fase 19 — Performance avançada: somente após novas medições; cache de OCR; renderização; paralelismo controlado; memória.
+- Fase 20 — Aprendizado com correções humanas: aprender padrões a partir de correções reais, de forma controlada, rastreável e reversível.
+
+**Princípios do roadmap**
+- Precisão antes de cobertura.
+- Cada fase deve ser concluída, testada e consolidada antes da próxima.
+- Nenhuma fase futura deve ser implementada durante a fase atual.
+- O roadmap é uma direção arquitetural, não um contrato rígido.
+- Alterações devem ser orientadas por evidência e medições reais.
 
 ## Data files
 

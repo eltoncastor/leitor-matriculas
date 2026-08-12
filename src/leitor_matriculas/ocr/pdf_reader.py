@@ -123,7 +123,26 @@ def iterar_paginas(caminho_pdf: str, dpi: int = 200) -> Iterator[PaginaPdf]:
                 # depois que ele sair de escopo.
                 imagem_bgr = imagem_rgb[:, :, ::-1].copy()
 
+                # Fase 14: solta o pixmap e a view sobre ele ANTES do yield.
+                # Um gerador fica PAUSADO no yield enquanto quem consome
+                # trabalha -- e aqui quem consome roda o OCR da página, que
+                # leva dezenas de segundos. Sem isto, as variáveis locais
+                # continuam vivas nesse intervalo inteiro: medido em 26,4 MB
+                # por página, dos quais ~8,8 MB são o buffer do pixmap, que
+                # já foi copiado para `imagem_bgr` e não serve mais para
+                # nada. `imagem_rgb` é só uma view sobre esse buffer e o
+                # mantém vivo, por isso as duas precisam sair.
+                # Não muda o resultado: `imagem_bgr` é uma cópia própria.
+                pixmap = None
+                imagem_rgb = None
+                pagina = None
+
                 yield PaginaPdf(numero=numero, imagem=imagem_bgr, erro=None)
+
+                # Depois que o consumidor volta, esta página já foi usada:
+                # soltar a referência evita segurá-la durante a renderização
+                # da próxima (não haveria duas páginas vivas ao mesmo tempo).
+                imagem_bgr = None
             except Exception as exc:
                 yield PaginaPdf(numero=numero, imagem=None, erro=str(exc))
     finally:
