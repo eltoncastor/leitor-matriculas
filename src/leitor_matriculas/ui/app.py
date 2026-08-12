@@ -210,8 +210,6 @@ class App(tb.Window):
         # dois lotes diferentes.
         self._contexto_lote = ContextoLote()
 
-        self._imagem_original = None
-        self._imagem_processada = None
         self._arquivo_atual = None
 
         self._processando = False
@@ -816,8 +814,17 @@ class App(tb.Window):
                 self._registros_exportacao.append(self._registro_erro_pagina(numero, erro))
             else:
                 if imagem_original is not None and imagem_processada is not None:
-                    self._imagem_original = imagem_original
-                    self._imagem_processada = imagem_processada
+                    # Fase 19: a imagem original (26,8 MB) e a processada
+                    # (2,9 MB) NÃO ficam mais guardadas na App. Elas eram
+                    # atribuídas a `self._imagem_original`/`_imagem_processada`
+                    # desde antes da Fase 10, quando o topo da tela tinha as
+                    # duas pré-visualizações; aquele redesenho removeu os
+                    # painéis e as atribuições ficaram para trás -- eram
+                    # escritas e nunca lidas. O efeito era reter 29,7 MB por
+                    # página: durante o OCR da página seguinte a App ainda
+                    # segurava as duas matrizes da anterior, e ao fim do lote
+                    # as da última folha ficavam vivas pelo resto da sessão.
+                    # O que a revisão usa é a miniatura JPEG logo abaixo.
                     # Guarda a foto desta página para a aba de Revisão: sem
                     # ela, o operador teria de abrir o arquivo por fora para
                     # conferir o que está escrito no papel.
