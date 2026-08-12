@@ -18,7 +18,29 @@ import numpy as np
 # O PaddleOCR já teria que redimensionar sozinho (e avisa sobre isso), então
 # fazemos esse redimensionamento aqui de forma controlada, preservando a
 # proporção, para ter um processamento mais previsível e rápido.
-LADO_MAXIMO_PADRAO = 3500
+#
+# O VALOR (Fase 13 -- benchmark de resolução): 2339 é a resolução em que o
+# PDF do mês já chega ao OCR (o `pdf_reader` renderiza a 200 DPI, o que dá
+# 2339x1317 nestas folhas) e que a operação vinha usando de fato. O
+# benchmark comparou 5 resoluções sobre as MESMAS 5 folhas reais, com a
+# resolução como única variável, e mediu, contra 3500 (o valor anterior):
+#
+#     tempo   66,0 -> 40,3 s por página   (-39%)
+#     RAM     5272 -> 2633 MB de pico     (-50%)
+#     acerto  17 -> 19 CONFIRMADO corretos, com o MESMO único defeito
+#
+# A 3500 o OCR perdia campos que a 2339 ele lê (uma matrícula e duas horas),
+# e a Fase 12 corretamente barrava esses registros -- daí os 2 CONFIRMADO a
+# menos. Abaixo de 2339 o resultado se degrada e não pôde ser adotado:
+# 2000 inventou uma linha fantasma e leu 29306 como 99306; 1800 trocou uma
+# matrícula ambígua; 1600 confirmou o RESPONSÁVEL ERRADO (GRL lido como
+# GR4). Ver o relatório da Fase 13.
+#
+# Para voltar ao comportamento anterior basta este número (ou passar
+# `lado_maximo=` na chamada). Reduzir mais exige repetir o benchmark: a
+# degradação abaixo de 2339 é silenciosa e aparece como dado errado
+# confirmado, não como erro.
+LADO_MAXIMO_PADRAO = 2339
 
 
 def _limitar_tamanho(imagem: np.ndarray, lado_maximo: int) -> np.ndarray:
