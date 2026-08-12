@@ -240,6 +240,58 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
     assert 999 not in paginas_pendentes, "linha ERRO nao pode aparecer na revisao manual"
     print("OK: PROBLEMA E -- linha ERRO nunca aparece na revisao manual")
 
+    # -------- Fase 18: a revisao EXPLICA a duvida ------------------------
+    # Dirigido pelo contrato programatico (_explicacao_revisao_atual /
+    # _revisao_ir_para / revisao_vars), nunca cacando widgets na arvore do
+    # Tk -- que e o erro que a Fase 10 corrigiu.
+    pendentes_18 = app._indices_pendentes_revisao()
+    if pendentes_18:
+        for posicao in range(len(pendentes_18)):
+            app._revisao_ir_para(posicao)
+            explicacao, sinais = app._explicacao_revisao_atual()
+            indice_atual, registro_atual = app._revisao_registro_atual()
+
+            # 1. toda linha em REVISAO tem explicacao
+            assert not explicacao.vazia, f"linha {indice_atual} ficou sem explicacao"
+            assert explicacao.como_texto(), f"linha {indice_atual} explicou vazio"
+
+            # 2. a explicacao nomeia o campo que bloqueou (quando ha dossie)
+            if registro_atual.get("evidencias"):
+                assert explicacao.campos_bloqueantes, \
+                    f"linha {indice_atual} nao identificou o campo bloqueante"
+                for campo in explicacao.campos_bloqueantes:
+                    assert campo in app.revisao_vars, \
+                        f"campo bloqueante {campo!r} nao existe no formulario"
+
+            # 3. NENHUM campo do formulario chega pre-preenchido com sugestao:
+            #    o valor exibido e sempre o que ja estava no registro.
+            for chave, var in app.revisao_vars.items():
+                assert var.get() == (registro_atual.get(chave) or ""), (
+                    f"campo {chave!r} da linha {indice_atual} foi pre-preenchido "
+                    f"({var.get()!r} != {registro_atual.get(chave)!r})"
+                )
+
+            # 4. sinais de contexto sao informativos: nao mexem em revisao_vars
+            antes = {k: v.get() for k, v in app.revisao_vars.items()}
+            sinais_2 = app._explicacao_revisao_atual()[1]
+            depois = {k: v.get() for k, v in app.revisao_vars.items()}
+            assert antes == depois, "montar os sinais de contexto alterou revisao_vars"
+            assert len(sinais) == len(sinais_2), "sinais de contexto nao sao deterministicos"
+            for sinal in sinais:
+                assert sinal.tipo == "contexto", sinal
+                assert sinal.origem in (
+                    "gestores_do_lote", "ordem_cronologica_da_folha",
+                ), f"sinal de contexto nao previsto: {sinal.origem}"
+        print(f"OK: Fase 18 -- {len(pendentes_18)} linha(s) em revisao com explicacao, "
+              "nenhum campo pre-preenchido")
+
+    # A explicacao nunca inventa: sem dossie e sem observacao, sai vazia.
+    from leitor_matriculas.ui import explicacao_revisao as _expl
+    assert _expl.explicar([], "").vazia, "explicacao sem dado nenhum deveria sair vazia"
+    assert not _expl.explicar([], "algum motivo").vazia, \
+        "sem dossie, a observacao antiga ainda deve ser mostrada"
+    print("OK: Fase 18 -- explicacao nunca inventa texto")
+
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()
 

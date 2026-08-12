@@ -60,6 +60,7 @@ from leitor_matriculas.parsing.contexto_lote import ContextoLote
 from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
 from leitor_matriculas.validacao.regras import classificar_registro
 from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
+from leitor_matriculas.ui import explicacao_revisao
 from leitor_matriculas.ocr import pdf_reader
 from leitor_matriculas.exportacao import xlsx_exporter
 
@@ -429,8 +430,31 @@ class App(tb.Window):
         )
         self.lbl_revisao_motivo.pack(side="top", fill="x", pady=(6, 10))
 
+        # Fase 18: a explicação da dúvida, lida do dossiê da Fase 17. Entra
+        # ACIMA do formulário porque é o que o operador precisa ler ANTES de
+        # digitar. O rótulo de observação acima continua existindo (é o texto
+        # que a validação sempre produziu); aqui vem a cadeia detalhada.
+        self.moldura_revisao_explicacao = ttk.Labelframe(
+            moldura_form, text="Por que está em revisão", padding=10,
+        )
+        self.lbl_revisao_explicacao = ttk.Label(
+            self.moldura_revisao_explicacao, text="", wraplength=420, justify="left",
+        )
+        self.lbl_revisao_explicacao.pack(side="top", fill="x", anchor="w")
+        # Sinais de contexto (Fase 16, medidos e aprovados só para EXIBIÇÃO).
+        # Rótulo próprio e estilo próprio: contexto não pode ficar
+        # indistinguível de dado confirmado.
+        self.lbl_revisao_contexto = ttk.Label(
+            self.moldura_revisao_explicacao, text="", bootstyle="info",
+            wraplength=420, justify="left",
+        )
+
         campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=12)
         campos.pack(side="top", fill="x")
+        # Guardado porque a moldura da explicação (Fase 18) é empacotada
+        # com `before=` este frame -- ela aparece e some conforme houver ou
+        # não o que explicar, sem reordenar o resto do formulário.
+        self.moldura_revisao_campos = campos
 
         self.revisao_vars = {}
         self.revisao_widgets = {}
@@ -1344,6 +1368,7 @@ class App(tb.Window):
                 var.set("")
             self.lbl_revisao_posicao.config(text="Nenhum registro pendente de revisão")
             self.lbl_revisao_motivo.config(text="")
+            self._mostrar_explicacao_revisao(None, None)
             self.lbl_revisao_nome.config(text="—")
             self.lbl_revisao_setor.config(text="")
             self.lbl_revisao_resultado.config(text="")
@@ -1359,12 +1384,78 @@ class App(tb.Window):
             text=f"Pendente {posicao} de {len(pendentes)}  ·  página {registro['pagina_origem']}"
         )
         self.lbl_revisao_motivo.config(text=registro.get("observacao") or "")
+        # Fase 18: a explicação é montada ANTES de preencher os campos, e é
+        # só leitura -- `revisao_vars` continua recebendo exclusivamente o
+        # valor JÁ apurado do registro. Nenhuma sugestão entra aqui: um
+        # campo pré-preenchido com palpite viraria dado confirmado no
+        # clique seguinte, que é exatamente o que esta fase não pode fazer.
+        self._mostrar_explicacao_revisao(_indice, registro)
         for chave in ("data", "hora", "matricula", "motivo", "gestor"):
             self.revisao_vars[chave].set(registro.get(chave) or "")
         self._atualizar_derivados_revisao(registro)
         self.lbl_revisao_resultado.config(text="")
         self._mostrar_foto_pagina(registro["pagina_origem"])
         self._atualizar_rotulos_abas()
+
+    def _explicacao_revisao_atual(self):
+        """
+        Contrato programático da Fase 18 (mesmo espírito de
+        `_indices_pendentes_revisao`): devolve
+        `(ExplicacaoRevisao, [Evidencia de contexto])` da linha em revisão,
+        para o teste de integração verificar COMPORTAMENTO sem caçar
+        widgets na árvore do Tk.
+        """
+        indice, registro = self._revisao_registro_atual()
+        if registro is None:
+            return explicacao_revisao.ExplicacaoRevisao(), []
+        explicacao = explicacao_revisao.explicar(
+            registro.get("evidencias"), registro.get("observacao") or ""
+        )
+        sinais = explicacao_revisao.sinais_de_contexto(self._registros_exportacao, indice)
+        return explicacao, sinais
+
+    def _mostrar_explicacao_revisao(self, indice, registro):
+        """Escreve a explicação e os sinais de contexto na tela. Só desenha
+        -- não toca em `revisao_vars` nem em nada do registro."""
+        if registro is None:
+            self.lbl_revisao_explicacao.config(text="")
+            self.lbl_revisao_contexto.config(text="")
+            self.moldura_revisao_explicacao.pack_forget()
+            self.lbl_revisao_contexto.pack_forget()
+            return
+
+        try:
+            explicacao, sinais = self._explicacao_revisao_atual()
+        except Exception:
+            # Explicar é conveniência: se falhar, a revisão continua
+            # funcionando exatamente como antes da Fase 18.
+            logging.exception("Falha ao montar a explicação da revisão")
+            explicacao, sinais = explicacao_revisao.ExplicacaoRevisao(), []
+
+        texto = explicacao.como_texto()
+        self.lbl_revisao_explicacao.config(text=texto)
+
+        # Contexto vem com prefixo próprio e estilo próprio para nunca se
+        # confundir com o dado confirmado do registro.
+        if sinais:
+            partes = []
+            for sinal in sinais:
+                parte = f"ⓘ {sinal.motivo}"
+                if sinal.valor_observado:
+                    parte += f"\n    {sinal.valor_observado}"
+                partes.append(parte)
+            self.lbl_revisao_contexto.config(text="\n".join(partes))
+            self.lbl_revisao_contexto.pack(side="top", fill="x", anchor="w", pady=(8, 0))
+        else:
+            self.lbl_revisao_contexto.config(text="")
+            self.lbl_revisao_contexto.pack_forget()
+
+        if texto or sinais:
+            self.moldura_revisao_explicacao.pack(
+                side="top", fill="x", pady=(0, 10), before=self.moldura_revisao_campos
+            )
+        else:
+            self.moldura_revisao_explicacao.pack_forget()
 
     def _atualizar_derivados_revisao(self, registro):
         nome = registro.get("nome") or "—"
