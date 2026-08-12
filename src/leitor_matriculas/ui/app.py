@@ -1020,6 +1020,13 @@ class App(tb.Window):
                 "ocr_nao_associados": [
                     c.texto for c in (registro.nao_associados or []) if (c.texto or "").strip()
                 ],
+                # Fase 17 (motor de evidências): o dossiê do registro, em
+                # dados puros. Mesma natureza de chave técnica que
+                # `ocr_nao_associados` acima -- fica no dict de exportação
+                # e FORA das COLUNAS do xlsx_exporter, portanto não aparece
+                # na planilha. Esta fase não expõe evidência ao usuário
+                # final: quem vai consumir isto é a Fase 18.
+                "evidencias": resultado_classificacao.dossie.como_dicionarios(),
             })
 
         self._sincronizar_tabela_principal()
@@ -1511,6 +1518,11 @@ class App(tb.Window):
         registro["hora"] = resultado.hora_confirmada or ""
         registro["gestor"] = resultado.gestor_confirmado or gestor_digitado
         registro["motivo"] = resultado.motivo_confirmado or motivo_digitado
+        # O dossiê acompanha a REavaliação: depois de uma correção manual,
+        # a evidência que vale é a da decisão que acabou de ser tomada, não
+        # a da leitura original do OCR (que continua registrada dentro do
+        # próprio dossiê, como `ocr_bruto`).
+        registro["evidencias"] = resultado.dossie.como_dicionarios()
         if matricula_normalizada:
             registro["confianca_matricula"] = 1.0
         if gestor_digitado:

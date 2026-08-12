@@ -78,6 +78,7 @@ from leitor_matriculas.validacao.integridade import (
     descrever_perda,
     detectar_campos_perdidos,
 )
+from leitor_matriculas.validacao import evidencias as ev
 
 CONFIANCA_MINIMA_MATRICULA = 0.80
 
@@ -115,13 +116,22 @@ class ResultadoValidacao(tuple):
     """
 
     def __new__(cls, status, observacao, motivo_confirmado=None, gestor_confirmado=None,
-                hora_confirmada=None, data_confirmada=None, matricula_confirmada=None):
+                hora_confirmada=None, data_confirmada=None, matricula_confirmada=None,
+                dossie=None):
         obj = super().__new__(cls, (status, observacao))
         obj.motivo_confirmado = motivo_confirmado
         obj.gestor_confirmado = gestor_confirmado
         obj.hora_confirmada = hora_confirmada
         obj.data_confirmada = data_confirmada
         obj.matricula_confirmada = matricula_confirmada
+        # Fase 17 (motor de evidências): o DossieRegistro com o que
+        # sustentou esta decisão. Segue exatamente o padrão dos atributos
+        # acima -- acrescentado à dataclass sem tocar no tuple, então
+        # `status, observacao = classificar_registro(...)` continua
+        # funcionando igual. Nunca é None na prática (a função sempre
+        # monta um dossiê); o default existe para quem constrói um
+        # ResultadoValidacao à mão nos testes.
+        obj.dossie = dossie if dossie is not None else ev.DossieRegistro()
         return obj
 
     @property
@@ -133,11 +143,85 @@ class ResultadoValidacao(tuple):
         return self[1]
 
 
+def _registrar_campo_bruto(dossie, registro, nome_campo) -> None:
+    """
+    Ponto de partida da cadeia de evidência de um campo: o que o OCR
+    entregou, com que confiança e em que posição da folha.
+
+    Registra AUSENCIA quando o campo não veio -- e isso é diferente de
+    não registrar nada. Um campo sem nenhuma evidência significa que o
+    motor não olhou para ele; um campo com evidência de `ausencia`
+    significa que o motor olhou e não havia o que ler. É a mesma
+    distinção que a Fase 12 precisou fazer entre "a folha não tinha" e
+    "o OCR perdeu".
+    """
+    campo = registro.campos.get(nome_campo)
+    texto = (campo.texto if campo else "") or ""
+    if not texto.strip():
+        dossie.registrar(
+            nome_campo, ev.TIPO_AUSENCIA, "parsing.registro_parser", ev.NEUTRO,
+            "o parser não associou nenhum texto a esta coluna",
+        )
+        return
+
+    confianca = getattr(campo, "confianca", None)
+    dossie.registrar(
+        nome_campo, ev.TIPO_OCR_BRUTO, "ocr.engine", ev.NEUTRO,
+        "texto lido pelo OCR nesta coluna"
+        + (f" (confiança {confianca * 100:.0f}%)" if confianca is not None else ""),
+        valor_observado=texto,
+        valor_relacionado=None if confianca is None else f"{confianca:.4f}",
+    )
+    # A POSIÇÃO só era usada pelo parser e morria ali (medido: presente em
+    # 38 das 40 liberações reais e sem nenhum consumidor). É NEUTRA -- não
+    # sustenta nem põe em dúvida o valor --, mas é o que permite apontar
+    # onde conferir na folha.
+    caixa = getattr(campo, "box", None)
+    if caixa:
+        dossie.registrar(
+            nome_campo, ev.TIPO_POSICAO, "parsing.registro_parser", ev.NEUTRO,
+            "posição da caixa do OCR na imagem processada (x1,y1,x2,y2)",
+            valor_observado=",".join(str(v) for v in caixa),
+        )
+
+
+def _registrar_correspondencia(dossie, nome_campo, origem, status, texto_ocr,
+                               valor_confirmado, similaridade, segundo_candidato=None) -> None:
+    """
+    Confronto de um campo de texto livre (MOTIVO/RESPONSÁVEL) contra a
+    sua base fechada. Guarda o NÚMERO da similaridade e o SEGUNDO melhor
+    candidato -- os dois existiam a cada execução e eram descartados
+    (medido: 37/40 e 40/40 respectivamente), e são justamente o que
+    explica um resultado AMBIGUA a quem for ler depois.
+    """
+    aceitou = status in ("EXATA", "APROXIMADA", "NORMALIZADA")
+    motivos = {
+        "EXATA": "bate exatamente com um valor da base",
+        "APROXIMADA": "aceito por correspondência aproximada dentro do limiar",
+        "NORMALIZADA": "reconhecido e canonicalizado para o valor da base",
+        "AMBIGUA": "dois candidatos da base disputam de forma parecida demais",
+        "SEM_CORRESPONDENCIA": "nenhum candidato da base chegou perto o suficiente",
+        "SEM_CANDIDATOS": "base indisponível: não havia contra o que comparar",
+        "VAZIO": "nada a comparar",
+    }
+    dossie.registrar(
+        nome_campo, ev.TIPO_CORRESPONDENCIA_BASE, origem,
+        ev.FAVORAVEL if aceitou else ev.DUVIDA,
+        motivos.get(status, status)
+        + (f" (similaridade {similaridade:.2f})" if similaridade is not None else "")
+        + (f"; 2º candidato: {segundo_candidato}" if segundo_candidato else ""),
+        valor_observado=texto_ocr, valor_relacionado=valor_confirmado,
+    )
+
+
 def _resolver_motivo_do_registro(campo, candidatos):
     """
     Resolve o MOTIVO contra a base (ver
     `correspondencia_aproximada.resolver_motivo`). Devolve
-    (valor_confirmado, aviso, erro):
+    (valor_confirmado, aviso, erro, resultado_bruto) -- o quarto item é o
+    `ResultadoMotivo` inteiro, que a Fase 17 usa para registrar a
+    evidência (status e similaridade) sem ter de resolver o motivo duas
+    vezes:
         - erro: mensagem de REVISAO (SEM_CORRESPONDENCIA/AMBIGUA), ou None
           se pôde confirmar (exato, aproximado ou normalizado).
         - valor_confirmado: o texto a usar (só quando erro é None).
@@ -148,31 +232,31 @@ def _resolver_motivo_do_registro(campo, candidatos):
     resultado = resolver_motivo(campo.texto, candidatos)
 
     if resultado.status == "EXATA":
-        return resultado.motivo_confirmado, None, None
+        return resultado.motivo_confirmado, None, None, resultado
 
     if resultado.status == "NORMALIZADA":
         return resultado.motivo_confirmado, (
             f"motivo normalizado para {resultado.motivo_confirmado} a partir do OCR: "
             f"'{resultado.texto_original}'"
-        ), None
+        ), None, resultado
 
     if resultado.status == "APROXIMADA":
         return resultado.motivo_confirmado, (
             f"motivo reconhecido por aproximação: '{resultado.motivo_confirmado}' "
             f"(OCR: '{resultado.texto_original}', similaridade {resultado.similaridade:.2f})"
-        ), None
+        ), None, resultado
 
     if resultado.status == "AMBIGUA":
         return None, None, (
             f"motivo '{campo.texto}' ambíguo entre candidatos "
             f"parecidos na base"
             f"{' (' + resultado.segundo_candidato + ')' if resultado.segundo_candidato else ''} "
-            f"-- não é possível confirmar com segurança"
+            f"-- não é possível confirmar com segurança", resultado
         )
 
     # SEM_CORRESPONDENCIA (VAZIO/SEM_CANDIDATOS não chegam aqui — quem
     # chama só invoca isto quando o campo existe e a base está disponível)
-    return None, None, f"motivo '{campo.texto}' não reconhecido na base"
+    return None, None, f"motivo '{campo.texto}' não reconhecido na base", resultado
 
 
 def classificar_registro(
@@ -205,10 +289,37 @@ def classificar_registro(
     # porque o registro precisou ir para revisão por causa de outro campo.
     # `normalizar_hora` devolve a hora já em HH:MM (ou None quando ilegível):
     # a planilha nunca repete o separador que o OCR leu ("18.59" -> "18:59").
+    # Fase 17: o dossiê é montado a partir dos valores que esta função JÁ
+    # calcula, nos mesmos pontos em que ela os calcula. Nada é recomputado
+    # e nenhuma decisão consulta o dossiê -- ele é observacional. Por isso
+    # acrescentá-lo não pode mudar status nenhum.
+    dossie = ev.DossieRegistro()
+    _registrar_campo_bruto(dossie, registro, "data")
+    _registrar_campo_bruto(dossie, registro, "hora")
+    _registrar_campo_bruto(dossie, registro, "matricula")
+    _registrar_campo_bruto(dossie, registro, "motivo")
+    _registrar_campo_bruto(dossie, registro, "gestor")
+
     campo_hora_reg = registro.campos.get("hora")
     texto_hora = campo_hora_reg.texto if campo_hora_reg else ""
     hora_confirmada = recuperar_hora(texto_hora)
     aviso_hora = avaliar_hora_opcional(texto_hora)
+
+    if hora_confirmada and hora_confirmada != texto_hora:
+        dossie.registrar(
+            "hora", ev.TIPO_NORMALIZACAO, "tempo_parser.recuperar_hora", ev.FAVORAVEL,
+            "hora reescrita no formato canônico HH:MM",
+            valor_observado=texto_hora, valor_relacionado=hora_confirmada,
+        )
+    if aviso_hora:
+        # HORA é opcional: isto é DÚVIDA, nunca bloqueio -- e o dossiê
+        # precisa deixar isso explícito, senão a Fase 18 mostraria um
+        # aviso com cara de erro.
+        dossie.registrar(
+            "hora", ev.TIPO_REGRA, "tempo_parser.avaliar_hora_opcional", ev.DUVIDA,
+            "hora presente mas ilegível; campo é opcional, não bloqueia",
+            valor_observado=texto_hora,
+        )
 
     # INTEGRIDADE DA CAPTURA (Fase 12): um campo pode chegar aqui vazio por
     # dois motivos MUITO diferentes -- a folha não o tinha, ou o OCR o leu e
@@ -218,6 +329,16 @@ def classificar_registro(
     # explicação" em "vazio COM evidência de perda", que é o que pode
     # bloquear.
     campos_perdidos = detectar_campos_perdidos(registro)
+
+    for _campo_perdido, _suspeito in campos_perdidos.items():
+        # CONFLITO, não ausência: o campo chegou vazio E existe na linha um
+        # fragmento com a cara dele. As duas coisas não podem ser verdade
+        # ao mesmo tempo, e é essa contradição que a Fase 12 usa.
+        dossie.registrar(
+            _campo_perdido, ev.TIPO_CONFLITO, "validacao.integridade", ev.DUVIDA,
+            "campo vazio, mas o OCR leu nesta linha um fragmento com formato deste campo",
+            valor_observado=_suspeito,
+        )
 
     # DATA canônica (dd/mm/aa) -- calculada uma vez e devolvida em todos os
     # retornos, pelo mesmo motivo da hora: se a data é legível, a planilha
@@ -242,10 +363,55 @@ def classificar_registro(
                 f"data '{texto_data}' sem ano no OCR: ano completado pelo contexto do lote "
                 f"-> {data_por_contexto}"
             )
+            dossie.registrar(
+                "data", ev.TIPO_CONTEXTO, ev.CONTEXTO_ANO_DO_LOTE, ev.FAVORAVEL,
+                "ano não estava escrito nesta linha; veio das outras folhas do lote",
+                valor_observado=texto_data, valor_relacionado=data_por_contexto,
+            )
+    elif data_confirmada and data_confirmada != texto_data:
+        dossie.registrar(
+            "data", ev.TIPO_NORMALIZACAO, "tempo_parser.normalizar_data", ev.FAVORAVEL,
+            "data reescrita no formato canônico dd/mm/aa",
+            valor_observado=texto_data, valor_relacionado=data_confirmada,
+        )
 
     matricula_confirmada = None
     if resultado_matricula is not None and resultado_matricula.matricula:
         matricula_confirmada = resultado_matricula.matricula
+    if resultado_matricula is not None:
+        if resultado_matricula.houve_recuperacao:
+            dossie.registrar(
+                "matricula", ev.TIPO_NORMALIZACAO, "validacao.recuperacao_matricula", ev.FAVORAVEL,
+                "caractere não numérico resolvido; a leitura obtida existe na base",
+                valor_observado=resultado_matricula.texto_original,
+                valor_relacionado=resultado_matricula.matricula,
+            )
+        elif resultado_matricula.status == "AMBIGUA":
+            dossie.registrar(
+                "matricula", ev.TIPO_CONFLITO, "validacao.recuperacao_matricula", ev.DUVIDA,
+                "mais de uma leitura plausível existe na base -- seriam pessoas diferentes",
+                valor_observado=resultado_matricula.texto_original,
+                valor_relacionado=", ".join(resultado_matricula.candidatos or []),
+            )
+        elif resultado_matricula.status == "IRRECUPERAVEL":
+            dossie.registrar(
+                "matricula", ev.TIPO_CONFLITO, "validacao.recuperacao_matricula", ev.DUVIDA,
+                "texto não pôde ser convertido com segurança para dígitos",
+                valor_observado=resultado_matricula.texto_original,
+            )
+
+    if colaborador is not None:
+        dossie.registrar(
+            "matricula", ev.TIPO_CORRESPONDENCIA_BASE, "dados.data_manager.buscar_colaborador",
+            ev.FAVORAVEL, "matrícula encontrada na base de colaboradores",
+            valor_observado=matricula_confirmada, valor_relacionado=colaborador.get("nome"),
+        )
+    elif matricula_confirmada and data_manager.colaboradores_disponivel:
+        dossie.registrar(
+            "matricula", ev.TIPO_CORRESPONDENCIA_BASE, "dados.data_manager.buscar_colaborador",
+            ev.DUVIDA, "matrícula não encontrada na base de colaboradores",
+            valor_observado=matricula_confirmada,
+        )
 
     # GESTOR e MOTIVO são resolvidos AQUI, antes de qualquer retorno
     # bloqueante, pelo mesmo motivo da hora e da data: o resultado
@@ -293,19 +459,30 @@ def classificar_registro(
             )
         else:
             erros_campos.append(f"responsável '{campo_gestor.texto}' não reconhecido na base")
+        _registrar_correspondencia(
+            dossie, "gestor", "validacao.correspondencia_aproximada.resolver_responsavel",
+            resultado_responsavel.status, campo_gestor.texto,
+            resultado_responsavel.gestor_confirmado, resultado_responsavel.similaridade,
+        )
 
     motivo_confirmado = None
     campo_motivo = registro.campos.get("motivo")
     if not (campo_motivo and campo_motivo.texto and campo_motivo.texto.strip()):
         erros_campos.append("motivo não identificado pelo OCR")
     elif data_manager.motivos_disponivel:
-        motivo_confirmado, aviso_motivo, erro_motivo = _resolver_motivo_do_registro(
+        motivo_confirmado, aviso_motivo, erro_motivo, resultado_motivo = _resolver_motivo_do_registro(
             campo_motivo, data_manager.listar_motivos()
         )
         if erro_motivo:
             erros_campos.append(erro_motivo)
         elif aviso_motivo:
             avisos_campos.append(aviso_motivo)
+        _registrar_correspondencia(
+            dossie, "motivo", "validacao.correspondencia_aproximada.resolver_motivo",
+            resultado_motivo.status, campo_motivo.texto,
+            resultado_motivo.motivo_confirmado, resultado_motivo.similaridade,
+            segundo_candidato=resultado_motivo.segundo_candidato,
+        )
 
     def _resultado(status, observacao, **extras):
         extras.setdefault("hora_confirmada", hora_confirmada)
@@ -313,7 +490,17 @@ def classificar_registro(
         extras.setdefault("matricula_confirmada", matricula_confirmada)
         extras.setdefault("motivo_confirmado", motivo_confirmado)
         extras.setdefault("gestor_confirmado", gestor_confirmado)
+        extras.setdefault("dossie", dossie)
         return ResultadoValidacao(status, observacao, **extras)
+
+    def _registrar_bloqueio(campo, motivo_do_bloqueio):
+        """A regra que efetivamente barrou o registro. É registrada como
+        DUVIDA e não como um "resultado ruim": o dossiê descreve o que se
+        observou, e quem decide continua sendo esta função."""
+        dossie.registrar(
+            campo, ev.TIPO_REGRA, "validacao.regras.classificar_registro", ev.DUVIDA,
+            motivo_do_bloqueio,
+        )
 
     def _com_evidencia_de_perda(mensagem, nome_campo):
         """Acrescenta à mensagem de bloqueio o texto que o OCR chegou a ler
@@ -326,18 +513,24 @@ def classificar_registro(
             return mensagem
         return f"{mensagem} (possível perda de captura: o OCR leu '{suspeito}' nesta linha)"
 
-    def _bloqueio(motivo_do_bloqueio):
+    def _bloqueio(motivo_do_bloqueio, campo_bloqueado=None):
         """REVISAO por uma checagem bloqueante. A razão do bloqueio vem
         primeiro (é o que o operador precisa ler), mas os avisos de
         normalização de motivo/responsável vão junto: eles carregam o
         texto CRU do OCR, que sai das colunas normalizadas e não pode
-        sumir da auditoria."""
+        sumir da auditoria.
+
+        `campo_bloqueado` só alimenta o dossiê (Fase 17): diz QUAL campo
+        derrubou o registro, que é a pergunta que a Fase 18 precisa
+        responder e que a `observacao` só respondia em prosa."""
+        if campo_bloqueado:
+            _registrar_bloqueio(campo_bloqueado, motivo_do_bloqueio)
         partes = [motivo_do_bloqueio] + ([aviso_data] if aviso_data else []) + avisos_campos
         return _resultado("REVISAO", "; ".join(partes))
 
     if not registro.completo:
         return _bloqueio(
-            _com_evidencia_de_perda("matrícula não identificada pelo OCR", "matricula")
+            _com_evidencia_de_perda("matrícula não identificada pelo OCR", "matricula"), "matricula"
         )
 
     # DATA é obrigatória: esta continua sendo uma checagem bloqueante. O
@@ -345,7 +538,7 @@ def classificar_registro(
     # completado pelo contexto do lote, quando houve. `validar_data` é
     # chamada só para produzir a mensagem, exatamente como antes.
     if data_confirmada is None:
-        return _bloqueio(_com_evidencia_de_perda(validar_data(texto_data), "data"))
+        return _bloqueio(_com_evidencia_de_perda(validar_data(texto_data), "data"), "data")
 
     # O outro lado do contexto do lote: o ano ESTÁ escrito, a data é
     # válida, mas o ano destoa de todas as outras folhas da remessa
@@ -359,7 +552,8 @@ def classificar_registro(
             return _bloqueio(
                 f"ano da data ({ano_divergente}) destoa do restante do lote "
                 f"({contexto_lote.ano_do_lote()}) -- conferir no papel; "
-                f"texto do OCR: '{texto_data}'"
+                f"texto do OCR: '{texto_data}'",
+                "data",
             )
 
     campo_matricula = registro.campos["matricula"]
@@ -371,23 +565,26 @@ def classificar_registro(
         candidatos = ", ".join(resultado_matricula.candidatos or [])
         return _bloqueio(
             f"matrícula '{resultado_matricula.texto_original}' ambígua -- "
-            f"mais de uma leitura existe na base ({candidatos})"
+            f"mais de uma leitura existe na base ({candidatos})",
+            "matricula",
         )
 
     if resultado_matricula is not None and resultado_matricula.status == "IRRECUPERAVEL":
         return _bloqueio(
             f"matrícula '{resultado_matricula.texto_original}' não pôde ser "
-            f"convertida com segurança para dígitos"
+            f"convertida com segurança para dígitos",
+            "matricula",
         )
 
     if colaborador is None:
         if data_manager.colaboradores_disponivel:
-            return _bloqueio("matrícula não encontrada na base de colaboradores")
-        return _bloqueio("base de colaboradores indisponível")
+            return _bloqueio("matrícula não encontrada na base de colaboradores", "matricula")
+        return _bloqueio("base de colaboradores indisponível", "matricula")
 
     if campo_matricula.confianca is not None and campo_matricula.confianca < CONFIANCA_MINIMA_MATRICULA:
         return _bloqueio(
-            f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
+            f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)",
+            "matricula",
         )
 
     # HORA PERDIDA (Fase 12) -- a única checagem bloqueante NOVA desta fase.
@@ -407,7 +604,7 @@ def classificar_registro(
     # que o operador precisa ler primeiro.
     hora_perdida = campos_perdidos.get("hora")
     if hora_perdida and hora_confirmada is None:
-        return _bloqueio(descrever_perda("hora", hora_perdida))
+        return _bloqueio(descrever_perda("hora", hora_perdida), "hora")
 
     # Passadas as checagens bloqueantes, só resta aplicar o que gestor e
     # motivo (já resolvidos lá em cima) apuraram.
@@ -431,6 +628,17 @@ def classificar_registro(
     avisos.extend(avisos_campos)
 
     if erros_campos:
+        # MOTIVO e RESPONSÁVEL são os únicos que chegam até aqui: os
+        # demais já retornaram acima. Registra-se o bloqueio no campo
+        # certo lendo a própria mensagem -- é a mesma informação, só
+        # estruturada.
+        for _erro in erros_campos:
+            _registrar_bloqueio("gestor" if "responsável" in _erro else "motivo", _erro)
         return _resultado("REVISAO", "; ".join(erros_campos))
 
+    for _campo in ev.CAMPOS_COM_EVIDENCIA:
+        dossie.registrar(
+            _campo, ev.TIPO_REGRA, "validacao.regras.classificar_registro", ev.FAVORAVEL,
+            "nenhuma checagem bloqueante recusou este campo",
+        )
     return _resultado("CONFIRMADO", "; ".join(avisos))
