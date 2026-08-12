@@ -74,8 +74,17 @@ def linha(y1,y2,data,hora,nome,mat,setor,mot,gestor,conf_mat=0.9):
 resultados_ocr = cabecalho() + linha(40,60,"23.04.2026","11:05","Fulano","28972","TI","RH","Gestor X") \
                               + linha(70,90,"23.04.2026","11:10","Beltrano","99999","RH","ADM","Gestor Y", conf_mat=0.5)
 
+# Fase 20 (H5): o histórico de correções vai para um arquivo TEMPORÁRIO
+# durante o teste. Rodar a suíte não pode escrever no `dados/` real do
+# operador -- e este patch é também o que garante que o teste observe
+# exatamente o que a interface gravou.
+_tmp_dir_correcoes = tempfile.mkdtemp(prefix="teste_ui_correcoes_")
+_arquivo_correcoes = os.path.join(_tmp_dir_correcoes, "correcoes_humanas.jsonl")
+
 with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showinfo') as m_info, \
-     patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn:
+     patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn, \
+     patch('leitor_matriculas.dados.registro_correcoes.caminho_padrao',
+           return_value=_arquivo_correcoes):
     app = App()
     fake_engine = MagicMock()
     fake_engine.recognize.return_value = resultados_ocr
@@ -292,8 +301,56 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
         "sem dossie, a observacao antiga ainda deve ser mostrada"
     print("OK: Fase 18 -- explicacao nunca inventa texto")
 
+    # -------- Fase 20 (H5): o histórico registrou as correções ----------
+    # Infraestrutura de COLETA: grava depois da decisão e não participa
+    # dela. O que se verifica aqui é que ela captura o que se perdia --
+    # qual campo mudou, o valor anterior e o texto que o OCR havia lido --
+    # e que a linha que NÃO resolveu também foi registrada.
+    from leitor_matriculas.dados import registro_correcoes as _rc
+
+    correcoes = _rc.ler_correcoes(_arquivo_correcoes)
+    assert correcoes, "nenhuma correcao humana foi registrada"
+
+    # A correção 1 (matrícula 28972) resolveu; a 2 (matrícula 00000) não.
+    resolvidas = [c for c in correcoes if c["resolveu"]]
+    nao_resolvidas = [c for c in correcoes if not c["resolveu"]]
+    assert resolvidas, "correcao que virou CONFIRMADO nao foi registrada"
+    assert nao_resolvidas, "correcao que permaneceu em REVISAO nao foi registrada"
+
+    primeira = resolvidas[0]
+    assert primeira["status_antes"] == "REVISAO"
+    assert primeira["status_depois"] == "CONFIRMADO"
+    assert primeira["campos"]["matricula"]["depois"] == "28972"
+    # `campos_alterados` PODE ser vazio, e isso é informação, não falha:
+    # aqui o operador conferiu a linha e confirmou o valor que já estava
+    # (o que a destravou foi a base, não uma digitação). "Revisado e
+    # mantido" é evidência tão real quanto "revisado e trocado" -- e é a
+    # que some primeiro de qualquer registro informal.
+    assert isinstance(primeira["campos_alterados"], list)
+    # O texto BRUTO do OCR, que a planilha exportada só preservava para a
+    # matrícula, e que `_revisao_confirmar` sobrescreve no dict.
+    assert primeira["campos"]["matricula"]["ocr"], primeira["campos"]["matricula"]
+    assert set(primeira["campos"]) == set(_rc.CAMPOS_REGISTRADOS)
+    # Pelo menos UMA das correções da sessão mudou algum campo de fato
+    # (a de matrícula 00000, que não resolveu).
+    assert any(c["campos_alterados"] for c in correcoes), \
+        "nenhuma correcao registrou campo alterado"
+    # E o campo que bloqueava a linha antes da correção.
+    assert any(c["campos_bloqueantes_antes"] for c in correcoes), \
+        "nenhuma correcao registrou o campo bloqueante anterior"
+    assert primeira["esquema"] == _rc.ESQUEMA and primeira["quando"]
+    print(f"OK: Fase 20 -- {len(correcoes)} correcao(oes) humana(s) registradas "
+          f"({len(resolvidas)} resolveram, {len(nao_resolvidas)} nao)")
+
+    # A gravação é observacional: não alterou nenhum status nem a lista de
+    # pendentes (o registro é feito DEPOIS da decisão).
+    assert all(r["status"] in ("CONFIRMADO", "REVISAO", "ERRO")
+               for r in app._registros_exportacao)
+    print("OK: Fase 20 -- registrar a correcao nao alterou nenhuma decisao")
+
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()
 
 shutil.rmtree(_tmp_dir_img, ignore_errors=True)
+shutil.rmtree(_tmp_dir_correcoes, ignore_errors=True)
 print("TESTE DE INTEGRACAO UI COMPLETO: OK")

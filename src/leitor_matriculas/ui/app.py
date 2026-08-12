@@ -50,6 +50,7 @@ from PIL import Image, ImageTk
 from leitor_matriculas.ocr.image_processor import preprocess_image
 from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
 from leitor_matriculas.dados.data_manager import DataManager
+from leitor_matriculas.dados import registro_correcoes
 from leitor_matriculas.parsing.registro_parser import (
     CampoOcr,
     Registro,
@@ -1608,6 +1609,16 @@ class App(tb.Window):
             contexto_lote=self._contexto_lote,
         )
 
+        # Fase 20 (H5): fotografia do estado ANTERIOR, tirada aqui porque as
+        # linhas abaixo sobrescrevem o dict no lugar. Sem esta cópia, o valor
+        # que estava em cada campo antes da correção -- e o dossiê com o
+        # texto que o OCR havia lido em CADA um dos 5 campos -- deixa de
+        # existir no instante seguinte. Foi exatamente essa perda que
+        # impediu as hipóteses H1-H4 desta fase de serem medidas: o único
+        # vestígio de uma sessão real era a planilha exportada, que guarda
+        # só o estado posterior. Copiar não altera nada do fluxo.
+        estado_anterior = dict(registro)
+
         registro["matricula"] = matricula_normalizada
         registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
         registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
@@ -1641,6 +1652,22 @@ class App(tb.Window):
         if resultado.status == "CONFIRMADO" and status_anterior != "CONFIRMADO":
             self._contador_revisao -= 1
             self._contador_confirmados += 1
+
+        # Fase 20 (H5): grava a correção no histórico -- DEPOIS que a
+        # decisão já foi tomada, e sem participar dela. Nada acima desta
+        # linha consulta o histórico, e nada abaixo depende do resultado
+        # da gravação: `registrar_correcao` já engole as próprias falhas
+        # (disco cheio, arquivo aberto no Excel) e devolve False, pelo
+        # mesmo critério da miniatura da foto na Fase 10 -- perder uma
+        # linha de histórico não pode custar o lote que ainda não foi
+        # exportado. Registra também a correção que NÃO resolveu: uma
+        # tentativa que continuou em REVISAO é evidência tão legítima
+        # quanto uma que confirmou.
+        registro_correcoes.registrar_correcao(
+            antes=estado_anterior,
+            depois=registro,
+            evidencias_antes=estado_anterior.get("evidencias"),
+        )
 
         self._sincronizar_tabela_principal()
         self._atualizar_botao_revisao()

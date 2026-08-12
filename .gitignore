@@ -146,3 +146,9 @@ dados/*.xlsx
 
 # Configuração local do Claude
 .claude/settings.local.json
+
+# Historico de correcoes humanas (Fase 20): contem matriculas, nomes de
+# gestores e datas reais -- pelo mesmo motivo que os XLSX acima, nunca deve
+# ser versionado. Nada no programa le este arquivo: apaga-lo devolve o
+# sistema exatamente ao estado anterior a Fase 20.
+dados/correcoes_humanas.jsonl
