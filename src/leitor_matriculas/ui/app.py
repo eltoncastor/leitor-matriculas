@@ -32,6 +32,26 @@ ao operador e mandava conferir no papel). O que NÃO mudou é a regra: o
 botão continua sem poder "marcar como confirmado". Ele reconstrói um
 Registro com os valores digitados e roda a MESMA `classificar_registro`
 do fluxo automático; só sai de REVISAO o que a validação aceitar.
+
+FLUXO PRINCIPAL (Fase 21a): a janela abria direto numa tabela vazia de 12
+colunas — a primeira tela do programa não respondia "o que eu faço
+agora?", só mostrava um gabarito em branco. Foi acrescentada a aba
+**Início**, que é o fluxo guiado do trabalho:
+
+    Escolher folhas -> Conferir a seleção -> Processar -> Resultado
+
+São três cartões alternados dentro da mesma aba (`_cartao_pronto`,
+`_cartao_selecao`, `_cartao_processando`), nunca dois ao mesmo tempo: em
+cada etapa existe UMA ação principal evidente e o próximo passo é o botão
+destacado. A escolha do arquivo deixou de disparar o processamento na
+hora — passa por uma etapa de conferência, que é onde o operador vê o que
+selecionou, quantas folhas são e (para PDF) quantas páginas o arquivo
+tem, antes de gastar ~40 s de OCR por folha.
+
+Nada disso toca o motor: os workers, a fila, a classificação, o parser, a
+exportação e a revisão são os mesmos. O que a fase acrescentou à fila foi
+a mensagem ("etapa", texto), puramente informativa, para a tela poder
+dizer em que passo a folha está em vez de só "Processando...".
 """
 
 import io
@@ -39,6 +59,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -62,6 +83,7 @@ from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesc
 from leitor_matriculas.validacao.regras import classificar_registro
 from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
 from leitor_matriculas.ui import explicacao_revisao
+from leitor_matriculas.ui import mensagens
 from leitor_matriculas.ocr import pdf_reader
 from leitor_matriculas.exportacao import xlsx_exporter
 
@@ -233,6 +255,17 @@ class App(tb.Window):
         self._total_paginas_lote = None
         self._paginas_processadas_lote = 0
 
+        # Fase 21a (fluxo principal). Estado APENAS de apresentação: em que
+        # etapa do fluxo a aba Início está, o que foi selecionado mas ainda
+        # não processado, e o que medir para mostrar progresso honesto.
+        # Nada aqui participa de nenhuma decisão de negócio.
+        self._etapa_fluxo = "pronto"          # pronto | selecao | processando
+        self._selecao_pendente = None         # {"tipo", "caminhos", "descricao", "total"}
+        self._etapa_atual = ""                # em que passo a folha corrente está
+        self._instante_inicio_lote = None     # time.monotonic() do início da leva
+        self._lote_concluido = False          # houve uma leva que terminou nesta sessão
+        self._ticker_processando = None       # id do after() que atualiza o tempo decorrido
+
         # Foto de cada página (JPEG comprimido), para a aba de Revisão.
         self._miniaturas_por_pagina = {}
         # Estado da aba de Revisão.
@@ -242,9 +275,13 @@ class App(tb.Window):
         self._foto_revisao = None    # referência viva do PhotoImage (senão o Tk descarta)
 
         self._montar_layout()
+        # Sincroniza a tabela já vazia para que o estado vazio (Fase 21a)
+        # apareça desde a abertura, em vez de uma grade em branco.
+        self._sincronizar_tabela_principal()
         self._atualizar_status()
         self._atualizar_avisos()
         self._atualizar_painel_revisao()
+        self._ir_para_etapa("pronto")
 
     # ==================================================================
     # LAYOUT
@@ -261,6 +298,10 @@ class App(tb.Window):
 
         self.abas = ttk.Notebook(self)
         self.abas.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 8))
+        # Fase 21a: Início é a PRIMEIRA aba porque é onde o trabalho começa.
+        # Antes o programa abria em Registros, isto é, na tabela de saída de
+        # um trabalho que ainda não tinha sido feito.
+        self._montar_aba_inicio()
         self._montar_aba_registros()
         self._montar_aba_revisao()
         self._montar_aba_avisos()
@@ -276,17 +317,30 @@ class App(tb.Window):
         # fica destacada à direita. Antes todos os botões tinham exatamente
         # o mesmo peso visual, então a ação que encerra o trabalho parecia
         # tão importante quanto "Ver avisos".
+        #
+        # Fase 21a: o cabeçalho deixou de ser o único lugar por onde o
+        # trabalho começa -- a aba Início passou a ter as ações principais,
+        # em tamanho e com explicação. Estes botões continuam existindo como
+        # ATALHO (chegar às mesmas ações de dentro de qualquer aba), e por
+        # isso ficaram todos com peso visual menor: quem carrega a ação
+        # principal agora é a tela, não a barra. "Gerar planilha" é a única
+        # exceção, porque é a ação que encerra o trabalho e não tem
+        # equivalente em nenhuma outra aba.
         entrada = ttk.Frame(cabecalho)
         entrada.pack(side="left")
 
+        ttk.Label(entrada, text="Leitor de Matrículas", font=("", 12, "bold")).pack(
+            side="left", padx=(0, 16)
+        )
+
         self.btn_imagem = ttk.Button(
-            entrada, text="Selecionar imagens", bootstyle="primary",
-            command=self._on_selecionar_imagem, width=20,
+            entrada, text="Fotos das folhas", bootstyle="primary-outline",
+            command=self._on_selecionar_imagem, width=18,
         )
         self.btn_imagem.pack(side="left", padx=(0, 6))
         self.btn_pdf = ttk.Button(
-            entrada, text="Selecionar PDF", bootstyle="primary-outline",
-            command=self._on_selecionar_pdf, width=18,
+            entrada, text="Arquivo PDF", bootstyle="primary-outline",
+            command=self._on_selecionar_pdf, width=14,
         )
         self.btn_pdf.pack(side="left", padx=(0, 6))
         self.btn_limpar = ttk.Button(
@@ -325,6 +379,358 @@ class App(tb.Window):
         self.lbl_progresso = ttk.Label(self._frame_progresso, text="", width=22, anchor="e")
         self.lbl_progresso.pack(side="left", padx=(10, 0))
 
+    # ==================================================================
+    # ABA INÍCIO -- o fluxo principal do trabalho (Fase 21a)
+    #
+    # Três cartões ocupam o mesmo lugar e só um aparece por vez, conforme
+    # `_etapa_fluxo`. A troca é feita SÓ por `_ir_para_etapa`, pelo mesmo
+    # motivo que `_sincronizar_tabela_principal` é o único ponto que
+    # escreve na tabela: com dois caminhos para mudar de estado, a tela
+    # acaba mostrando dois estados ao mesmo tempo.
+    # ==================================================================
+    def _montar_aba_inicio(self):
+        aba = ttk.Frame(self.abas, padding=(24, 18))
+        self.abas.add(aba, text="Início")
+        self._aba_inicio = aba
+
+        ttk.Label(aba, text="Leitor de Matrículas", font=("", 19, "bold")).pack(anchor="w")
+        ttk.Label(
+            aba,
+            text="Transforma as folhas de liberação — fotografadas ou em PDF — numa planilha conferida.",
+            bootstyle="secondary",
+        ).pack(anchor="w", pady=(2, 16))
+
+        self._container_fluxo = ttk.Frame(aba)
+        self._container_fluxo.pack(side="top", fill="both", expand=True)
+
+        self._montar_cartao_pronto()
+        self._montar_cartao_selecao()
+        self._montar_cartao_processando()
+
+    # ------------------------------------------------------------------
+    def _montar_cartao_pronto(self):
+        """Etapa 1 (e também a tela de resultado): o que dá para fazer agora."""
+        cartao = ttk.Frame(self._container_fluxo)
+        self._cartao_pronto = cartao
+
+        # Faixa de conclusão -- só aparece logo depois de uma leva terminar.
+        # É o que responde "acabou?" sem o operador ter de reparar que uma
+        # barra sumiu ou que uma palavra mudou no rodapé.
+        self.lbl_inicio_concluido = ttk.Label(
+            cartao, text="", bootstyle="success", font=("", 13, "bold"),
+        )
+
+        acoes = ttk.Labelframe(cartao, text="O que você quer fazer?", padding=16)
+        acoes.pack(side="top", fill="x")
+        # Guardado porque a faixa de conclusão é empacotada com `before=`
+        # ele -- assim ela aparece e some sem reordenar o resto do cartão.
+        self._moldura_acoes_inicio = acoes
+        linha_botoes = ttk.Frame(acoes)
+        linha_botoes.pack(side="top", fill="x")
+        self.btn_inicio_imagens = ttk.Button(
+            linha_botoes, text="Fotos das folhas", bootstyle="primary",
+            command=self._on_selecionar_imagem, width=22,
+        )
+        self.btn_inicio_imagens.pack(side="left")
+        self.btn_inicio_pdf = ttk.Button(
+            linha_botoes, text="Arquivo PDF", bootstyle="primary-outline",
+            command=self._on_selecionar_pdf, width=22,
+        )
+        self.btn_inicio_pdf.pack(side="left", padx=(10, 0))
+        ttk.Label(
+            acoes,
+            text="Escolha as fotos das folhas do dia (pode selecionar várias de uma vez) "
+                 "ou o arquivo PDF do mês.",
+            bootstyle="secondary", wraplength=760, justify="left",
+        ).pack(side="top", anchor="w", pady=(10, 0))
+
+        # Resultado do que já foi processado nesta sessão.
+        self.moldura_resultado = ttk.Labelframe(cartao, text="Último processamento", padding=16)
+
+        self.lbl_resultado_vazio = ttk.Label(
+            self.moldura_resultado, text=mensagens.VAZIO_SEM_PROCESSAMENTO, bootstyle="secondary",
+        )
+
+        self.frame_numeros = ttk.Frame(self.moldura_resultado)
+        self._numeros_resultado = {}
+        for coluna, (chave, rotulo, estilo) in enumerate([
+            ("folhas", "folhas lidas", "secondary"),
+            ("total", "registros", "primary"),
+            ("confirmados", "confirmados", "success"),
+            ("revisao", "para revisar", "warning"),
+            ("erros", "folhas com erro", "danger"),
+        ]):
+            bloco = ttk.Frame(self.frame_numeros)
+            bloco.grid(row=0, column=coluna, sticky="w", padx=(0, 34))
+            valor = ttk.Label(bloco, text="0", font=("", 24, "bold"), bootstyle=estilo)
+            valor.pack(anchor="w")
+            ttk.Label(bloco, text=rotulo, bootstyle="secondary").pack(anchor="w")
+            self._numeros_resultado[chave] = valor
+        # O bloco de erros só aparece quando houver erro: um "0" permanente
+        # em vermelho treina o olho a ignorar justamente o número que
+        # precisa ser notado quando deixar de ser zero.
+        self._bloco_erros = self._numeros_resultado["erros"].master
+
+        self.lbl_resultado_proximo = ttk.Label(
+            self.moldura_resultado, text="", wraplength=760, justify="left",
+        )
+
+        acoes_resultado = ttk.Frame(self.moldura_resultado)
+        self._acoes_resultado = acoes_resultado
+        self.btn_inicio_revisar = ttk.Button(
+            acoes_resultado, text="Revisar pendências", bootstyle="warning",
+            command=self._abrir_revisao, width=26,
+        )
+        self.btn_inicio_revisar.pack(side="left")
+        self.btn_inicio_salvar = ttk.Button(
+            acoes_resultado, text="Gerar planilha", bootstyle="success",
+            command=self._on_salvar, width=20,
+        )
+        self.btn_inicio_salvar.pack(side="left", padx=(10, 0))
+        self.btn_inicio_registros = ttk.Button(
+            acoes_resultado, text="Ver registros", bootstyle="secondary-outline",
+            command=lambda: self._selecionar_aba(self._aba_registros), width=16,
+        )
+        self.btn_inicio_registros.pack(side="left", padx=(10, 0))
+        self.btn_inicio_avisos = ttk.Button(
+            acoes_resultado, text="Ver avisos", bootstyle="secondary-outline",
+            command=lambda: self._selecionar_aba(self._aba_avisos), width=16,
+        )
+
+    # ------------------------------------------------------------------
+    def _montar_cartao_selecao(self):
+        """
+        Etapa 2: conferir o que foi selecionado ANTES de começar.
+
+        Antes da Fase 21a esta etapa não existia -- escolher o arquivo já
+        disparava o OCR. Num lote real isso significa descobrir que
+        selecionou a pasta errada depois de ~40 s por folha já gastos, e
+        com as folhas erradas já misturadas aos resultados (que se
+        ACUMULAM, ver `_on_limpar`).
+        """
+        cartao = ttk.Frame(self._container_fluxo)
+        self._cartao_selecao = cartao
+
+        moldura = ttk.Labelframe(cartao, text="Confira antes de processar", padding=16)
+        moldura.pack(side="top", fill="x")
+
+        self.lbl_selecao_titulo = ttk.Label(moldura, text="", font=("", 15, "bold"))
+        self.lbl_selecao_titulo.pack(anchor="w")
+        self.lbl_selecao_detalhe = ttk.Label(
+            moldura, text="", bootstyle="secondary", wraplength=780, justify="left",
+        )
+        self.lbl_selecao_detalhe.pack(anchor="w", pady=(4, 0))
+        # Aviso de acumulação: só quando já houver resultados na sessão.
+        self.lbl_selecao_acumulo = ttk.Label(
+            moldura, text="", bootstyle="info", wraplength=780, justify="left",
+        )
+
+        acoes = ttk.Frame(moldura)
+        acoes.pack(side="top", fill="x", pady=(16, 0))
+        self.btn_selecao_processar = ttk.Button(
+            acoes, text="Processar", bootstyle="success",
+            command=self._processar_selecao_pendente, width=26,
+        )
+        self.btn_selecao_processar.pack(side="left")
+        self.btn_selecao_trocar = ttk.Button(
+            acoes, text="Escolher outros arquivos", bootstyle="secondary-outline",
+            command=self._trocar_selecao, width=24,
+        )
+        self.btn_selecao_trocar.pack(side="left", padx=(10, 0))
+        self.btn_selecao_cancelar = ttk.Button(
+            acoes, text="Cancelar", bootstyle="secondary-outline",
+            command=self._cancelar_selecao, width=14,
+        )
+        self.btn_selecao_cancelar.pack(side="left", padx=(10, 0))
+
+        ttk.Label(
+            moldura,
+            text="A leitura leva cerca de 40 segundos por folha. Enquanto ela corre, "
+                 "as folhas já lidas vão aparecendo na aba Registros.",
+            bootstyle="secondary", wraplength=780, justify="left",
+        ).pack(anchor="w", pady=(12, 0))
+
+    # ------------------------------------------------------------------
+    def _montar_cartao_processando(self):
+        """Etapa 3: o que está acontecendo agora, e há quanto tempo."""
+        cartao = ttk.Frame(self._container_fluxo)
+        self._cartao_processando = cartao
+
+        moldura = ttk.Labelframe(cartao, text="Processando", padding=16)
+        moldura.pack(side="top", fill="x")
+
+        self.lbl_proc_titulo = ttk.Label(moldura, text="", font=("", 15, "bold"))
+        self.lbl_proc_titulo.pack(anchor="w")
+
+        self.barra_proc_inicio = ttk.Progressbar(
+            moldura, mode="determinate", maximum=100, value=0, bootstyle="primary-striped",
+        )
+        self.barra_proc_inicio.pack(side="top", fill="x", pady=(12, 6))
+
+        self.lbl_proc_etapa = ttk.Label(moldura, text="", wraplength=780, justify="left")
+        self.lbl_proc_etapa.pack(anchor="w")
+        # Tempo DECORRIDO e média MEDIDA. Nenhuma previsão de término: o
+        # tempo por folha varia com a foto, e um "faltam 3 min" que erra é
+        # pior que não ter estimativa nenhuma.
+        self.lbl_proc_tempo = ttk.Label(moldura, text="", bootstyle="secondary")
+        self.lbl_proc_tempo.pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(
+            moldura,
+            text="Pode acompanhar as folhas já lidas na aba Registros — o programa "
+                 "continua respondendo enquanto lê.",
+            bootstyle="secondary", wraplength=780, justify="left",
+        ).pack(anchor="w", pady=(12, 0))
+
+    # ------------------------------------------------------------------
+    # Máquina de estados da aba Início
+    # ------------------------------------------------------------------
+    def _selecionar_aba(self, aba):
+        try:
+            self.abas.select(aba)
+        except Exception:
+            logging.exception("Falha ao trocar de aba (apenas navegação)")
+
+    def _ir_para_etapa(self, etapa):
+        """Mostra o cartão da etapa pedida e esconde os outros."""
+        self._etapa_fluxo = etapa
+        cartoes = {
+            "pronto": self._cartao_pronto,
+            "selecao": self._cartao_selecao,
+            "processando": self._cartao_processando,
+        }
+        for nome, cartao in cartoes.items():
+            try:
+                if nome == etapa:
+                    cartao.pack(side="top", fill="both", expand=True)
+                else:
+                    cartao.pack_forget()
+            except Exception:
+                logging.exception("Falha ao alternar o cartão do fluxo (apenas cosmético)")
+        if etapa == "pronto":
+            self._atualizar_cartao_pronto()
+        elif etapa == "processando":
+            self._atualizar_cartao_processando()
+
+    def _atualizar_cartao_pronto(self):
+        """Preenche a tela de resultado a partir do que já foi processado."""
+        total = len(self._registros_exportacao)
+
+        if self._lote_concluido:
+            self.lbl_inicio_concluido.config(text="✓ Processamento concluído")
+            self.lbl_inicio_concluido.pack(
+                side="top", anchor="w", pady=(0, 12), before=self._moldura_acoes_inicio,
+            )
+        else:
+            self.lbl_inicio_concluido.pack_forget()
+
+        self.moldura_resultado.pack(side="top", fill="x", pady=(16, 0))
+
+        if not total:
+            self.frame_numeros.pack_forget()
+            self.lbl_resultado_proximo.pack_forget()
+            self._acoes_resultado.pack_forget()
+            self.lbl_resultado_vazio.pack(side="top", anchor="w")
+            return
+
+        self.lbl_resultado_vazio.pack_forget()
+
+        confirmados = sum(1 for r in self._registros_exportacao if r["status"] == "CONFIRMADO")
+        pendentes = len(self._indices_pendentes_revisao())
+        erros = sum(1 for r in self._registros_exportacao if r["status"] == "ERRO")
+
+        self._numeros_resultado["folhas"].config(text=str(self._paginas_processadas))
+        self._numeros_resultado["total"].config(text=str(total))
+        self._numeros_resultado["confirmados"].config(text=str(confirmados))
+        self._numeros_resultado["revisao"].config(text=str(pendentes))
+        self._numeros_resultado["erros"].config(text=str(erros))
+        if erros:
+            self._bloco_erros.grid()
+        else:
+            self._bloco_erros.grid_remove()
+        self.frame_numeros.pack(side="top", fill="x", anchor="w")
+
+        # O PRÓXIMO PASSO, dito com todas as letras -- é a pergunta que a
+        # tela de conclusão precisa responder, e que antes ficava por conta
+        # do operador deduzir de quais botões tinham acendido.
+        if pendentes:
+            proximo = (
+                f"Próximo passo: {pendentes} registro(s) precisam da sua conferência "
+                "antes de virarem planilha."
+            )
+        else:
+            proximo = "Tudo conferido. Próximo passo: gerar a planilha."
+        if erros:
+            proximo += f" {erros} folha(s) falharam e precisam ser processadas de novo — veja em Avisos."
+        self.lbl_resultado_proximo.config(text=proximo)
+        self.lbl_resultado_proximo.pack(side="top", anchor="w", pady=(14, 0))
+
+        # A ação principal do momento é a que fica destacada: revisar
+        # enquanto houver pendência, gerar planilha quando não houver mais.
+        if pendentes:
+            self.btn_inicio_revisar.config(
+                text=f"Revisar pendências ({pendentes})", bootstyle="warning", state="normal",
+            )
+            self.btn_inicio_salvar.config(bootstyle="success-outline")
+        else:
+            self.btn_inicio_revisar.config(
+                text="Revisar pendências (0)", bootstyle="secondary-outline", state="disabled",
+            )
+            self.btn_inicio_salvar.config(bootstyle="success")
+        self.btn_inicio_salvar.config(state="disabled" if self._processando else "normal")
+        if erros:
+            self.btn_inicio_avisos.pack(side="left", padx=(10, 0))
+        else:
+            self.btn_inicio_avisos.pack_forget()
+        self._acoes_resultado.pack(side="top", fill="x", pady=(14, 0))
+
+    def _atualizar_cartao_processando(self):
+        total = self._total_paginas_lote
+        feitas = self._paginas_processadas_lote
+        if total:
+            atual = min(feitas + 1, total)
+            self.lbl_proc_titulo.config(text=f"Lendo a folha {atual} de {total}")
+            pct = 100.0 * feitas / total
+            self.barra_proc_inicio.config(mode="determinate", value=pct)
+        else:
+            # Uma folha só: não há denominador, e inventar um seria mentir.
+            self.lbl_proc_titulo.config(text="Lendo a folha selecionada")
+            self.barra_proc_inicio.config(value=0)
+
+        self.lbl_proc_etapa.config(text=self._etapa_atual or "Preparando...")
+        self.lbl_proc_tempo.config(text=self._texto_tempo_decorrido())
+
+    def _texto_tempo_decorrido(self):
+        if self._instante_inicio_lote is None:
+            return ""
+        decorrido = time.monotonic() - self._instante_inicio_lote
+        texto = f"Tempo decorrido: {mensagens.duracao_legivel(decorrido)}"
+        # A média só é dita depois que existe alguma folha medida -- antes
+        # disso seria um número tirado do nada.
+        if self._paginas_processadas_lote:
+            media = decorrido / self._paginas_processadas_lote
+            texto += f"  ·  média medida: {mensagens.duracao_legivel(media)} por folha"
+        return texto
+
+    def _tick_processando(self):
+        """Mantém o tempo decorrido vivo mesmo entre duas folhas (o OCR de
+        uma folha leva ~40 s; sem isto o relógio ficaria parado o tempo
+        todo e a tela pareceria travada)."""
+        self._ticker_processando = None
+        if not self._processando:
+            return
+        try:
+            # Fechar a janela no meio de um lote deixa este callback
+            # agendado sobre widgets que já não existem -- mostrar o tempo
+            # decorrido nunca pode ser motivo de erro na saída do programa.
+            if not self.winfo_exists():
+                return
+            if self._etapa_fluxo == "processando":
+                self.lbl_proc_tempo.config(text=self._texto_tempo_decorrido())
+            self._ticker_processando = self.after(1000, self._tick_processando)
+        except Exception:
+            logging.exception("Falha ao atualizar o tempo decorrido (apenas informativo)")
+
     # ------------------------------------------------------------------
     def _montar_aba_registros(self):
         aba = ttk.Frame(self.abas, padding=10)
@@ -344,7 +750,17 @@ class App(tb.Window):
         self.lbl_contagem_tabela = ttk.Label(filtros, text="", bootstyle="secondary")
         self.lbl_contagem_tabela.pack(side="left", padx=12)
 
+        # Estado vazio (Fase 21a): uma grade de 12 colunas em branco não
+        # diz que não há nada A FAZER ali -- parece um formulário que o
+        # operador deveria estar preenchendo. O texto ocupa o lugar da
+        # tabela enquanto não houver linha nenhuma e diz para onde ir.
+        self.lbl_tabela_vazia = ttk.Label(
+            aba, text=mensagens.VAZIO_TABELA, bootstyle="secondary",
+            justify="center", anchor="center",
+        )
+
         moldura = ttk.Frame(aba)
+        self._moldura_tabela = moldura
         moldura.pack(side="top", fill="both", expand=True)
         # Sem bootstyle de cor nas tabelas: a moldura colorida do
         # ttkbootstrap desenha uma borda grossa em volta da tabela inteira,
@@ -562,7 +978,12 @@ class App(tb.Window):
         self.lbl_status = ttk.Label(rodape, text="Nenhum arquivo selecionado.")
         self.lbl_status.pack(side="left")
 
-        self.lbl_bases = ttk.Label(rodape, text=self._data_manager.resumo_status(), bootstyle="secondary")
+        # Prefixo "Bases:" para que os três números do rodapé se leiam como
+        # o que são -- o conteúdo das planilhas de referência carregadas --
+        # e não como mais um contador do lote em andamento.
+        self.lbl_bases = ttk.Label(
+            rodape, text=f"Bases: {self._data_manager.resumo_status()}", bootstyle="secondary",
+        )
         self.lbl_bases.pack(side="right")
 
     # ==================================================================
@@ -584,12 +1005,128 @@ class App(tb.Window):
             return
         caminhos = list(caminhos)
 
+        # Fase 21a: escolher o arquivo NÃO começa mais o processamento --
+        # leva à etapa de conferência. O que dispara o OCR é o botão
+        # "Processar" de lá (`_processar_selecao_pendente`), que reexecuta
+        # exatamente o código que estava aqui antes, sem nenhuma mudança de
+        # comportamento: só deixou de ser automático.
+        nomes = [os.path.basename(c) for c in caminhos]
+        self._registrar_selecao({
+            "tipo": "imagens",
+            "caminhos": caminhos,
+            "total": len(caminhos),
+            "titulo": mensagens.folhas_selecionadas(len(caminhos)),
+            "detalhe": self._descrever_arquivos(nomes, caminhos[0]),
+        })
+
+    def _on_selecionar_pdf(self):
+        if self._processando:
+            return
+        path = filedialog.askopenfilename(title="Selecione o PDF do mês", filetypes=EXTENSOES_PDF)
+        if not path:
+            return
+
+        # Contar as páginas aqui responde "quantas folhas são?" ANTES de
+        # gastar ~40 s de OCR por folha, e é também onde um PDF ilegível é
+        # descoberto de imediato -- antes essa falha só aparecia depois de a
+        # tela já ter entrado em "Processando...". `contar_paginas` é a
+        # mesma função que o worker já usava; nada novo é lido do arquivo.
+        try:
+            total = pdf_reader.contar_paginas(path)
+        except Exception as exc:
+            logging.exception("Falha ao abrir o PDF selecionado")
+            self._mostrar_falha("pdf", exc)
+            return
+
+        self._registrar_selecao({
+            "tipo": "pdf",
+            "caminho": path,
+            "total": total,
+            "titulo": f"{os.path.basename(path)} — {mensagens.plural_folhas(total)}",
+            "detalhe": f"Pasta: {os.path.dirname(os.path.abspath(path))}",
+        })
+
+    @staticmethod
+    def _descrever_arquivos(nomes, primeiro_caminho):
+        """Lista curta dos arquivos escolhidos + a pasta de origem. Mostrar
+        50 nomes não ajuda ninguém a conferir; mostrar os primeiros e a
+        pasta, sim."""
+        visiveis = ", ".join(nomes[:4])
+        if len(nomes) > 4:
+            visiveis += f" e mais {len(nomes) - 4}"
+        return f"{visiveis}\nPasta: {os.path.dirname(os.path.abspath(primeiro_caminho))}"
+
+    def _registrar_selecao(self, selecao):
+        """Guarda o que foi escolhido e mostra a etapa de conferência."""
+        self._selecao_pendente = selecao
+        self.lbl_selecao_titulo.config(text=selecao["titulo"])
+        self.lbl_selecao_detalhe.config(text=selecao["detalhe"])
+        self.btn_selecao_processar.config(
+            text=f"Processar {mensagens.plural_folhas(selecao['total'])}"
+        )
+
+        # Os resultados se ACUMULAM na mesma tabela até "Limpar resultados"
+        # (comportamento antigo, mantido). Isso é útil -- é como se juntam
+        # fotos avulsas ao PDF do mês -- mas é uma surpresa desagradável
+        # quando não era a intenção, e até agora nada na tela avisava.
+        if self._registros_exportacao:
+            self.lbl_selecao_acumulo.config(
+                text=f"ⓘ Estas folhas serão ACRESCENTADAS aos {len(self._registros_exportacao)} "
+                     "registro(s) já processados. Para começar do zero, use “Limpar resultados”."
+            )
+            self.lbl_selecao_acumulo.pack(side="top", anchor="w", pady=(10, 0))
+        else:
+            self.lbl_selecao_acumulo.pack_forget()
+
+        self._ir_para_etapa("selecao")
+        self._selecionar_aba(self._aba_inicio)
+        self.lbl_status.config(text=f"{selecao['titulo']} — confira e clique em “Processar”.")
+
+    def _trocar_selecao(self):
+        """Reabre o seletor do MESMO tipo já escolhido."""
+        selecao = self._selecao_pendente
+        self._cancelar_selecao()
+        if selecao and selecao["tipo"] == "pdf":
+            self._on_selecionar_pdf()
+        else:
+            self._on_selecionar_imagem()
+
+    def _cancelar_selecao(self):
+        self._selecao_pendente = None
+        self._ir_para_etapa("pronto")
+        self._atualizar_status(concluido=self._lote_concluido)
+
+    def _processar_selecao_pendente(self):
+        """
+        Dispara o processamento do que foi conferido na etapa de seleção.
+
+        O corpo é o mesmo que estava em `_on_selecionar_imagem` /
+        `_on_selecionar_pdf` antes da Fase 21a -- mesmos workers, mesma
+        fila, mesmo isolamento por página. A única diferença é QUANDO ele
+        roda: depois de o operador confirmar, não no clique do seletor.
+        """
+        if self._processando or not self._selecao_pendente:
+            return
+        selecao = self._selecao_pendente
+        self._selecao_pendente = None
+
+        if selecao["tipo"] == "pdf":
+            caminho = selecao["caminho"]
+            self._arquivo_atual = os.path.basename(caminho)
+            self._iniciar_processamento(f"Abrindo {self._arquivo_atual} ...")
+            threading.Thread(target=self._worker_pdf, args=(caminho,), daemon=True).start()
+            self.after(100, self._verificar_fila)
+            return
+
+        caminhos = selecao["caminhos"]
         if len(caminhos) == 1:
             path = caminhos[0]
             try:
                 imagem = _ler_imagem(path)
             except Exception as exc:
-                messagebox.showerror("Erro ao abrir imagem", str(exc))
+                logging.exception("Falha ao abrir a foto selecionada")
+                self._mostrar_falha("imagem", exc)
+                self._ir_para_etapa("pronto")
                 return
             self._arquivo_atual = os.path.basename(path)
             self._iniciar_processamento(f"Processando {self._arquivo_atual} ...")
@@ -602,16 +1139,19 @@ class App(tb.Window):
         threading.Thread(target=self._worker_imagens, args=(caminhos,), daemon=True).start()
         self.after(100, self._verificar_fila)
 
-    def _on_selecionar_pdf(self):
-        if self._processando:
-            return
-        path = filedialog.askopenfilename(title="Selecione o PDF do mês", filetypes=EXTENSOES_PDF)
-        if not path:
-            return
-        self._arquivo_atual = os.path.basename(path)
-        self._iniciar_processamento(f"Abrindo {self._arquivo_atual} ...")
-        threading.Thread(target=self._worker_pdf, args=(path,), daemon=True).start()
-        self.after(100, self._verificar_fila)
+    def _mostrar_falha(self, categoria, excecao=None, detalhe=""):
+        """
+        Único ponto por onde uma falha chega ao operador (Fase 21a).
+
+        Traduz para linguagem operacional via `ui/mensagens.py` -- o que
+        aconteceu, o que fazer, e só então o texto técnico. Antes o que
+        aparecia era o `str(exc)` cru, que responde a pergunta do
+        programador e nenhuma das duas do operador.
+        """
+        texto_tecnico = detalhe or (str(excecao) if excecao is not None else "")
+        titulo, corpo = mensagens.descrever_falha(categoria, texto_tecnico)
+        self.lbl_status.config(text=f"Erro: {titulo}")
+        messagebox.showerror(titulo, corpo)
 
     def _iniciar_processamento(self, texto_status):
         self._processando = True
@@ -627,6 +1167,18 @@ class App(tb.Window):
         self._paginas_processadas_lote = 0
         self.barra_progresso.config(value=0)
 
+        # Fase 21a: entra na tela de acompanhamento e liga o relógio do
+        # tempo decorrido. Continua sendo chamado direto pelos testes com
+        # um texto de status qualquer -- por isso tudo aqui é tolerante a
+        # ser chamado fora do fluxo da aba Início.
+        self._etapa_atual = "Preparando..."
+        self._instante_inicio_lote = time.monotonic()
+        self._lote_concluido = False
+        self._alternar_acoes_inicio(habilitado=False)
+        self._ir_para_etapa("processando")
+        if self._ticker_processando is None:
+            self._ticker_processando = self.after(1000, self._tick_processando)
+
     def _finalizar_processamento(self):
         self._processando = False
         self.btn_imagem.config(state="normal")
@@ -634,34 +1186,76 @@ class App(tb.Window):
         self.btn_limpar.config(state="normal")
         if self._registros_exportacao:
             self.btn_salvar.config(state="normal")
+        self._etapa_atual = ""
+        if self._ticker_processando is not None:
+            try:
+                self.after_cancel(self._ticker_processando)
+            except Exception:
+                pass
+            self._ticker_processando = None
+        self._alternar_acoes_inicio(habilitado=True)
+
+    def _alternar_acoes_inicio(self, habilitado):
+        """As ações de entrada da aba Início seguem as do cabeçalho: durante
+        o processamento não faz sentido abrir outro seletor de arquivos."""
+        estado = "normal" if habilitado else "disabled"
+        for botao in (getattr(self, "btn_inicio_imagens", None), getattr(self, "btn_inicio_pdf", None)):
+            try:
+                if botao is not None:
+                    botao.config(state=estado)
+            except Exception:
+                pass
+
+    def _informar_etapa(self, texto):
+        """
+        Chamado DA THREAD WORKER: nunca toca em widget, só põe uma mensagem
+        na fila -- o mesmo canal (e a mesma regra) que os resultados já
+        usam desde sempre. É informação de acompanhamento; não participa de
+        nenhuma decisão.
+        """
+        try:
+            self._fila_resultados.put(("etapa", texto))
+        except Exception:
+            logging.exception("Falha ao informar a etapa atual (apenas informativo)")
 
     # ==================================================================
     # Workers (thread separada -- nunca tocam no Tkinter diretamente)
     # ==================================================================
     def _processar_uma_pagina(self, imagem_bgr):
-        """Devolve (imagem_processada, registros, erro). Nunca levanta exceção."""
+        """Devolve (imagem_processada, registros, erro). Nunca levanta exceção.
+
+        As chamadas a `_informar_etapa` são apenas de acompanhamento (Fase
+        21a): descrevem, em português, o passo em que a folha está. Não
+        alteram nenhum resultado nem nenhuma decisão -- só permitem que a
+        tela diga algo mais útil que "Processando...".
+        """
+        self._informar_etapa("Preparando a imagem da folha")
         try:
             imagem_processada = preprocess_image(imagem_bgr)
         except Exception as exc:
             return None, [], f"Erro no pré-processamento: {exc}"
 
         if self._ocr_engine is None:
+            self._informar_etapa("Iniciando o leitor de texto (só na primeira folha)")
             try:
                 self._ocr_engine = get_ocr_engine("paddleocr")
             except ImportError as exc:
                 return None, [], f"PaddleOCR não instalado: {exc}"
 
+        self._informar_etapa("Lendo o texto escrito à mão (esta é a parte demorada)")
         try:
             resultados_ocr = self._ocr_engine.recognize(imagem_processada)
         except Exception as exc:
             return imagem_processada, [], f"Erro no OCR: {exc}"
 
+        self._informar_etapa("Organizando as linhas e colunas da folha")
         try:
             registros = parse_registros(resultados_ocr).registros
             _reparar_data_hora_mescladas(registros)
         except Exception as exc:
             return imagem_processada, [], f"Erro no parser espacial: {exc}"
 
+        self._informar_etapa("Conferindo os dados contra as bases")
         return imagem_processada, registros, None
 
     def _worker_imagem(self, imagem_bgr):
@@ -796,8 +1390,20 @@ class App(tb.Window):
         if tipo == "erro_fatal":
             _, titulo, mensagem = item
             self._finalizar_processamento()
-            self.lbl_status.config(text=f"Erro: {titulo}")
-            messagebox.showerror(titulo, mensagem)
+            # Fase 21a: a categoria vem do título que o worker já produzia
+            # ("Erro ao abrir o PDF", "Erro inesperado processando a
+            # imagem"), então o protocolo da fila não mudou. O texto da
+            # exceção continua na mensagem -- só deixou de ser tudo o que
+            # o operador recebe (ver ui/mensagens.py).
+            self._mostrar_falha(mensagens.categoria_da_origem(titulo), detalhe=mensagem)
+            self._ir_para_etapa("pronto")
+            return
+
+        if tipo == "etapa":
+            # Puramente informativo (Fase 21a): em que passo a folha está.
+            self._etapa_atual = item[1]
+            if self._etapa_fluxo == "processando":
+                self.lbl_proc_etapa.config(text=self._etapa_atual)
             return
 
         if tipo == "total":
@@ -858,8 +1464,16 @@ class App(tb.Window):
 
         if tipo == "fim":
             self._finalizar_processamento()
+            self._lote_concluido = True
             self._atualizar_status(concluido=True)
             self._atualizar_painel_revisao()
+            # Fase 21a: terminar o lote leva de volta à tela de resultado,
+            # que é onde estão os números e o próximo passo. Antes o único
+            # sinal de conclusão era a palavra "Concluído" no rodapé e a
+            # barra de progresso sumindo -- dois sinais discretos demais
+            # para o fim de um trabalho de uma hora.
+            self._ir_para_etapa("pronto")
+            self._selecionar_aba(self._aba_inicio)
             return
 
     def _atualizar_status(self, concluido=False):
@@ -870,22 +1484,46 @@ class App(tb.Window):
         # falta é o tipo de incerteza que leva o operador a fechar o
         # programa achando que travou, perdendo tudo que já tinha sido
         # processado (nada é salvo em disco até "Gerar planilha").
-        if not concluido and self._total_paginas_lote:
-            rotulo_paginas = f"Página {self._paginas_processadas_lote}/{self._total_paginas_lote}"
+        # Fase 21a: com nada processado e nada rodando, a barra dizia
+        # "Processando... Páginas: 0 | Confirmados: 0 | Revisão: 0" -- era
+        # a PRIMEIRA frase que o programa mostrava ao abrir, e era falsa.
+        # A causa é que o prefixo vinha de `concluido`, e não de estar ou
+        # não processando (o construtor chama este método com
+        # concluido=False).
+        if not self._processando and not self._registros_exportacao:
+            self.lbl_status.config(
+                text="Pronto. Escolha as fotos das folhas ou o PDF do mês na aba Início."
+            )
+            self._atualizar_progresso(concluido)
+            self._atualizar_rotulos_abas()
+            return
+
+        if self._processando and self._total_paginas_lote:
+            rotulo_paginas = f"Folha {self._paginas_processadas_lote}/{self._total_paginas_lote}"
         else:
-            rotulo_paginas = f"Páginas: {self._paginas_processadas}"
+            rotulo_paginas = f"Folhas lidas: {self._paginas_processadas}"
         partes = [
             rotulo_paginas,
             f"Confirmados: {self._contador_confirmados}",
-            f"Revisão: {self._contador_revisao}",
+            f"Para revisar: {self._contador_revisao}",
         ]
         if self._paginas_com_erro:
-            partes.append(f"Páginas com erro: {self._paginas_com_erro}")
-        prefixo = "Concluído — " if concluido else "Processando... "
+            partes.append(f"Folhas com erro: {self._paginas_com_erro}")
+        if self._processando:
+            prefixo = "Processando... "
+        elif concluido or self._lote_concluido:
+            prefixo = "Concluído — "
+        else:
+            prefixo = ""
         self.lbl_status.config(text=prefixo + " | ".join(partes))
 
         self._atualizar_progresso(concluido)
         self._atualizar_rotulos_abas()
+        # A tela do fluxo acompanha os mesmos números da barra de estado.
+        if self._etapa_fluxo == "processando":
+            self._atualizar_cartao_processando()
+        elif self._etapa_fluxo == "pronto":
+            self._atualizar_cartao_pronto()
 
     def _mostrar_progresso(self, visivel):
         """A barra só ocupa espaço enquanto há lote rodando."""
@@ -918,14 +1556,17 @@ class App(tb.Window):
         """Contadores nas abas: onde há trabalho pendente fica visível sem
         precisar entrar na aba."""
         try:
-            self.abas.tab(0, text=f"Registros ({len(self._registros_exportacao)})")
+            # Identificados pelo WIDGET, não por índice: a Fase 21a inseriu
+            # a aba Início na frente, e um índice fixo passaria a rotular a
+            # aba errada a cada nova aba acrescentada.
+            self.abas.tab(self._aba_registros, text=f"Registros ({len(self._registros_exportacao)})")
             pendentes = len(self._indices_pendentes_revisao())
-            self.abas.tab(1, text=f"Revisão ({pendentes})" if pendentes else "Revisão")
+            self.abas.tab(self._aba_revisao, text=f"Revisão ({pendentes})" if pendentes else "Revisão")
             total_avisos = (
                 len(self._erros_paginas) + len(self._avisos_contagem)
                 + len(self._avisos_descarte) + len(self._data_manager.avisos)
             )
-            self.abas.tab(2, text=f"Avisos ({total_avisos})" if total_avisos else "Avisos")
+            self.abas.tab(self._aba_avisos, text=f"Avisos ({total_avisos})" if total_avisos else "Avisos")
         except Exception:
             logging.exception("Falha ao atualizar os rótulos das abas (apenas cosmético)")
 
@@ -1114,11 +1755,35 @@ class App(tb.Window):
                 ),
                 tags=(self._tag_status(r["status"]),),
             )
+        total = len(self._registros_exportacao)
         if hasattr(self, "lbl_contagem_tabela"):
-            total = len(self._registros_exportacao)
             texto = f"{mostrados} de {total} registro(s)" if total else "nenhum registro ainda"
             self.lbl_contagem_tabela.config(text=texto)
+        self._atualizar_estado_vazio_tabela(mostrados, total)
         self._atualizar_rotulos_abas()
+
+    def _atualizar_estado_vazio_tabela(self, mostrados, total):
+        """Troca a tabela pelo texto de estado vazio quando não há linha a
+        mostrar -- distinguindo "ainda não processou nada" de "o filtro
+        atual não deixa nada aparecer", que são problemas diferentes e têm
+        saídas diferentes."""
+        if not hasattr(self, "lbl_tabela_vazia"):
+            return
+        try:
+            if mostrados:
+                self.lbl_tabela_vazia.pack_forget()
+                if not self._moldura_tabela.winfo_ismapped():
+                    self._moldura_tabela.pack(side="top", fill="both", expand=True)
+                return
+            self._moldura_tabela.pack_forget()
+            if total:
+                texto = mensagens.VAZIO_TABELA_FILTRADA.format(filtro=self.filtro_var.get())
+            else:
+                texto = mensagens.VAZIO_TABELA
+            self.lbl_tabela_vazia.config(text=texto)
+            self.lbl_tabela_vazia.pack(side="top", fill="both", expand=True, pady=(60, 0))
+        except Exception:
+            logging.exception("Falha ao alternar o estado vazio da tabela (apenas cosmético)")
 
     def _on_duplo_clique_tabela(self, _evento=None):
         """Duplo clique numa linha em revisão abre exatamente aquela linha
@@ -1155,6 +1820,11 @@ class App(tb.Window):
             self.tabela_avisos.insert("", "end", values=("Contagem de posições", a["pagina"], a["mensagem"]))
         for a in self._avisos_descarte:
             self.tabela_avisos.insert("", "end", values=("Linha sem matrícula", a["pagina"], a["mensagem"]))
+        # Estado vazio (Fase 21a): uma tabela de avisos em branco pode ser
+        # lida como "ainda não verificou" quando na verdade quer dizer
+        # "verificou e não há nada" -- que é a boa notícia.
+        if not self.tabela_avisos.get_children():
+            self.tabela_avisos.insert("", "end", values=("—", "—", mensagens.VAZIO_AVISOS))
         self._atualizar_rotulos_abas()
 
     # Mantidos: o fluxo por messagebox continua disponível (e é o que os
@@ -1215,7 +1885,16 @@ class App(tb.Window):
         self._atualizar_painel_revisao()
         self.barra_progresso.config(value=0)
         self.lbl_progresso.config(text="")
-        self.lbl_status.config(text="Resultados limpos. Nenhum arquivo selecionado.")
+        # Fase 21a: limpar devolve o fluxo ao começo -- inclusive a faixa de
+        # "concluído" e uma seleção que tivesse ficado pendente, que senão
+        # continuariam anunciando um lote que não existe mais.
+        self._lote_concluido = False
+        self._selecao_pendente = None
+        self._instante_inicio_lote = None
+        self._ir_para_etapa("pronto")
+        self.lbl_status.config(
+            text="Resultados limpos. Escolha as fotos das folhas ou o PDF do mês na aba Início."
+        )
 
     @staticmethod
     def _pasta_saida_padrao() -> str:
@@ -1277,10 +1956,26 @@ class App(tb.Window):
                 paginas_com_contagem_divergente=len(self._avisos_contagem),
             )
         except Exception as exc:
-            messagebox.showerror("Erro ao salvar XLSX", str(exc))
+            # A causa real e frequente aqui é a planilha estar aberta no
+            # Excel -- e "Permission denied: [Errno 13]" não diz isso a
+            # ninguém (ver ui/mensagens.py).
+            logging.exception("Falha ao salvar a planilha")
+            self._mostrar_falha("salvar", exc)
             return
 
-        messagebox.showinfo("Salvo", f"Planilha salva em:\n{path}")
+        pendentes = len(self._indices_pendentes_revisao())
+        aviso_pendentes = (
+            f"\n\nAtenção: {pendentes} registro(s) ainda estão marcados para revisão "
+            "e foram exportados assim, na aba “Revisão” da planilha."
+            if pendentes else ""
+        )
+        messagebox.showinfo(
+            "Planilha gerada",
+            f"{len(self._registros_exportacao)} registro(s) de "
+            f"{mensagens.plural_folhas(self._paginas_processadas)} foram salvos em:\n{path}"
+            f"{aviso_pendentes}",
+        )
+        self.lbl_status.config(text=f"Planilha gerada: {os.path.basename(path)}")
         pasta = os.path.dirname(os.path.abspath(path))
         if hasattr(os, "startfile"):  # só existe no Windows
             try:
