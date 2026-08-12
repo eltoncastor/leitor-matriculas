@@ -74,6 +74,10 @@ from leitor_matriculas.validacao.correspondencia_aproximada import (
     resolver_motivo,
     resolver_responsavel,
 )
+from leitor_matriculas.validacao.integridade import (
+    descrever_perda,
+    detectar_campos_perdidos,
+)
 
 CONFIANCA_MINIMA_MATRICULA = 0.80
 
@@ -206,6 +210,15 @@ def classificar_registro(
     hora_confirmada = recuperar_hora(texto_hora)
     aviso_hora = avaliar_hora_opcional(texto_hora)
 
+    # INTEGRIDADE DA CAPTURA (Fase 12): um campo pode chegar aqui vazio por
+    # dois motivos MUITO diferentes -- a folha não o tinha, ou o OCR o leu e
+    # o parser não conseguiu associá-lo à coluna. `integridade` separa os
+    # dois olhando o que sobrou na linha (ver validacao/integridade.py).
+    # Isto NÃO torna nenhum campo obrigatório: só transforma "vazio sem
+    # explicação" em "vazio COM evidência de perda", que é o que pode
+    # bloquear.
+    campos_perdidos = detectar_campos_perdidos(registro)
+
     # DATA canônica (dd/mm/aa) -- calculada uma vez e devolvida em todos os
     # retornos, pelo mesmo motivo da hora: se a data é legível, a planilha
     # deve mostrá-la normalizada mesmo num registro que foi para REVISAO
@@ -302,6 +315,17 @@ def classificar_registro(
         extras.setdefault("gestor_confirmado", gestor_confirmado)
         return ResultadoValidacao(status, observacao, **extras)
 
+    def _com_evidencia_de_perda(mensagem, nome_campo):
+        """Acrescenta à mensagem de bloqueio o texto que o OCR chegou a ler
+        para aquele campo, quando há. Sem isso o operador lê apenas "não
+        identificado" e não tem como saber que o dado ESTÁ na folha (e
+        onde) -- foi exatamente essa falta de rastro que escondeu o
+        problema até a medição da Fase 11."""
+        suspeito = campos_perdidos.get(nome_campo)
+        if not suspeito:
+            return mensagem
+        return f"{mensagem} (possível perda de captura: o OCR leu '{suspeito}' nesta linha)"
+
     def _bloqueio(motivo_do_bloqueio):
         """REVISAO por uma checagem bloqueante. A razão do bloqueio vem
         primeiro (é o que o operador precisa ler), mas os avisos de
@@ -312,14 +336,16 @@ def classificar_registro(
         return _resultado("REVISAO", "; ".join(partes))
 
     if not registro.completo:
-        return _bloqueio("matrícula não identificada pelo OCR")
+        return _bloqueio(
+            _com_evidencia_de_perda("matrícula não identificada pelo OCR", "matricula")
+        )
 
     # DATA é obrigatória: esta continua sendo uma checagem bloqueante. O
     # que bloqueia é não haver DATA CANÔNICA -- o que inclui o ano
     # completado pelo contexto do lote, quando houve. `validar_data` é
     # chamada só para produzir a mensagem, exatamente como antes.
     if data_confirmada is None:
-        return _bloqueio(validar_data(texto_data))
+        return _bloqueio(_com_evidencia_de_perda(validar_data(texto_data), "data"))
 
     # O outro lado do contexto do lote: o ano ESTÁ escrito, a data é
     # válida, mas o ano destoa de todas as outras folhas da remessa
@@ -363,6 +389,25 @@ def classificar_registro(
         return _bloqueio(
             f"confiança da matrícula baixa ({campo_matricula.confianca * 100:.0f}%)"
         )
+
+    # HORA PERDIDA (Fase 12) -- a única checagem bloqueante NOVA desta fase.
+    #
+    # A hora continua sendo um campo OPCIONAL: ausente ou ilegível, ela não
+    # bloqueia nada, exatamente como antes. O que bloqueia aqui é outra
+    # coisa: a coluna HORA está vazia E existe evidência, na própria linha,
+    # de que o OCR leu algo com forma de hora que se perdeu no caminho
+    # (ver validacao/integridade.py). Nesse caso não se sabe se a folha tem
+    # ou não uma hora -- e confirmar um registro sem saber é o "campo
+    # perdido silencioso" que a medição da Fase 11 encontrou (matrícula
+    # 26319, com `07:49` escrito no papel e a célula Hora vazia na
+    # planilha, marcada CONFIRMADO).
+    #
+    # Vem DEPOIS das checagens de matrícula/data de propósito: quando o
+    # registro já vai para REVISAO por um motivo mais grave, é esse motivo
+    # que o operador precisa ler primeiro.
+    hora_perdida = campos_perdidos.get("hora")
+    if hora_perdida and hora_confirmada is None:
+        return _bloqueio(descrever_perda("hora", hora_perdida))
 
     # Passadas as checagens bloqueantes, só resta aplicar o que gestor e
     # motivo (já resolvidos lá em cima) apuraram.

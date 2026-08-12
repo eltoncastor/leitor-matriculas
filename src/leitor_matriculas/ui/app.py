@@ -997,6 +997,14 @@ class App(tb.Window):
                 "confianca_motivo": campo_motivo.confianca if campo_motivo else "",
                 "observacao": observacao,
                 "texto_ocr_original": texto_matricula,
+                # Texto que o OCR leu nesta linha e o parser não conseguiu
+                # associar a coluna nenhuma. Guardado para a revisão manual
+                # poder rodar a MESMA checagem de integridade do fluxo
+                # automático (ver _revisao_confirmar). Chave técnica: o
+                # xlsx_exporter só lê as colunas que conhece e ignora esta.
+                "ocr_nao_associados": [
+                    c.texto for c in (registro.nao_associados or []) if (c.texto or "").strip()
+                ],
             })
 
         self._sincronizar_tabela_principal()
@@ -1449,7 +1457,22 @@ class App(tb.Window):
             campos_sinteticos["gestor"] = CampoOcr(texto=gestor_digitado, confianca=1.0, box=None)
         if motivo_digitado:
             campos_sinteticos["motivo"] = CampoOcr(texto=motivo_digitado, confianca=1.0, box=None)
-        registro_sintetico = Registro(indice=0, campos=campos_sinteticos)
+        # A evidência de campo perdido detectada no processamento automático
+        # (ver validacao/integridade.py) precisa SOBREVIVER à revisão
+        # manual. Sem isto, o registro sintético nasceria sem
+        # `nao_associados`, a checagem de integridade não teria o que ver, e
+        # bastaria abrir a revisão e clicar em confirmar para transformar em
+        # CONFIRMADO exatamente o registro que a Fase 12 passou a barrar --
+        # uma porta dos fundos para o problema que ela existe para fechar.
+        #
+        # Isto NÃO prende o operador: a checagem só dispara quando o campo
+        # continua VAZIO. Se ele digitar a hora que está no papel, o campo
+        # passa a existir e a evidência deixa de bloquear.
+        sobras = [
+            CampoOcr(texto=texto, confianca=None, box=None)
+            for texto in (registro.get("ocr_nao_associados") or [])
+        ]
+        registro_sintetico = Registro(indice=0, campos=campos_sinteticos, nao_associados=sobras)
 
         # PROBLEMA C: re-consulta a base pela matrícula corrigida --
         # Nome/Setor/Cargo têm que refletir a matrícula certa, nunca
