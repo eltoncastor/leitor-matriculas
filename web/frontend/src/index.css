@@ -36,6 +36,10 @@
   --animate-fade-in: fade-in 0.35s ease-out both;
   --animate-fade-up: fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-blob: blob 18s ease-in-out infinite;
+  /* Sub-fase 24d: pulso de reação à troca de rota -- ver AppShell.jsx.
+     ~0,6s de propósito ("perceptível num screenshot antes/depois do
+     clique, sem ser um efeito chamativo ou lento" -- pedido da fase). */
+  --animate-kick: kick 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @keyframes fade-in {
@@ -50,6 +54,16 @@
   0%, 100% { transform: translate(0, 0) scale(1); }
   33% { transform: translate(4%, -6%) scale(1.08); }
   66% { transform: translate(-3%, 4%) scale(0.95); }
+}
+@keyframes kick {
+  /* Um leve "empurrão" de escala + deslocamento, sobre o loop ambiente
+     de cada bolha (que continua rodando por baixo, como transform do
+     elemento PAI -- os dois se compõem). Termina exatamente onde
+     começou (0% == 100%), então não há salto perceptível quando o
+     pulso acaba e o loop ambiente segue sozinho. */
+  0% { transform: scale(1) translate(0, 0); }
+  35% { transform: scale(1.05) translate(1.5%, -1.5%); }
+  100% { transform: scale(1) translate(0, 0); }
 }
 
 html, body, #root {
@@ -73,3 +87,20 @@ body {
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgb(99 102 241 / 0.4); background-clip: content-box; }
+
+/* Sub-fase 24d: acessibilidade básica, não opcional -- quem pediu ao
+   sistema operacional para reduzir movimento não deveria ver os blobs
+   de fundo em loop perpétuo nem o pulso de troca de rota (nem as
+   demais transições de entrada). Regra ampla (não só `.animate-blob`/
+   `.animate-kick`): zera a DURAÇÃO de toda animação/transição do app
+   em vez de remover a propriedade -- os estados finais definidos com
+   `both`/`forwards` (fade-in, fade-up, kick) continuam sendo aplicados
+   instantaneamente, só o movimento em si desaparece. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

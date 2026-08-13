@@ -20,6 +20,17 @@ export class ApiError extends Error {
   }
 }
 
+/** Sub-fase 24d, achado da auditoria visual (com o backend derrubado de
+ * propósito para testar o estado de erro): quando o backend real está
+ * fora do ar, o proxy do Vite (ver vite.config.js) responde com `502` --
+ * uma resposta HTTP de verdade, só que sem corpo JSON -- então isto NÃO
+ * cai no `catch` de erro de rede do `fetch` (só cairia se o proxy também
+ * estivesse fora, ou sem a resposta chegar de jeito nenhum). Sem esta
+ * lista, o operador via a mensagem técnica "Erro HTTP 502" em vez de algo
+ * acionável. `504`/`503` são o mesmo tipo de sintoma (gateway/upstream
+ * inalcançável) e ficam cobertos pelo mesmo motivo. */
+const STATUS_SERVIDOR_INALCANCAVEL = new Set([502, 503, 504]);
+
 async function pedir(caminho, opcoes = {}) {
   const resposta = await fetch(`${BASE}${caminho}`, opcoes);
   if (!resposta.ok) {
@@ -28,7 +39,13 @@ async function pedir(caminho, opcoes = {}) {
       const corpo = await resposta.json();
       detalhe = corpo.detail || detalhe;
     } catch {
-      // corpo não era JSON (ex.: erro de rede/proxy) -- mantém a mensagem genérica
+      // corpo não era JSON -- ou é o backend fora do ar (ver acima) ou uma
+      // falha de infraestrutura sem detalhe estruturado nenhum; nos dois
+      // casos "Erro HTTP N" sozinho não ajuda o operador a saber o quê
+      // fazer.
+      if (STATUS_SERVIDOR_INALCANCAVEL.has(resposta.status)) {
+        detalhe = "Não foi possível falar com o servidor -- confira se o backend está rodando.";
+      }
     }
     throw new ApiError(resposta.status, detalhe);
   }

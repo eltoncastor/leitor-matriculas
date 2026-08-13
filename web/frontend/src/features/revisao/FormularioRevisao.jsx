@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronUp, Info, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
 import Button from "../../components/ui/Button";
+import StatusBadge from "../../components/ui/StatusBadge";
 import { corCampo, rotuloCampo } from "./vocabulario";
 
 const CAMPOS = ["data", "hora", "matricula", "motivo", "gestor"];
@@ -90,8 +91,18 @@ export default function FormularioRevisao({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-700">{posicaoTexto}</span>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {/* Sub-fase 24d: auditoria de consistência -- `StatusBadge` (o
+              mesmo vocabulário "Precisa de revisão" da tela de Resultado,
+              `ui/estilos.py::STATUS_VOCABULARIO`) existia desde a 24b mas
+              nunca tinha sido usado em lugar nenhum. Toda linha aqui É uma
+              pendência REVISAO por definição (a lista já filtra isso),
+              então o selo reforça o vocabulário compartilhado entre as
+              telas em vez de inventar um rótulo novo só para a Revisão. */}
+          <StatusBadge status="REVISAO" size="sm" />
+          <span className="text-sm font-semibold text-slate-700">{posicaoTexto}</span>
+        </div>
         {progressoTexto ? <span className="text-xs text-slate-400">{progressoTexto}</span> : null}
       </div>
 

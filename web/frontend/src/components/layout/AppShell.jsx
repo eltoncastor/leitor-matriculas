@@ -1,3 +1,4 @@
+import { useLocation } from "react-router-dom";
 import { ScanText } from "lucide-react";
 import clsx from "clsx";
 
@@ -10,6 +11,21 @@ import clsx from "clsx";
  * do Tkinter (`_montar_cabecalho`, Fase 22b) que também não decide nada.
  */
 export default function AppShell({ children, largo = false }) {
+  // Sub-fase 24d: a MUDANÇA DE ROTA (Seleção -> Processamento -> Resultado
+  // -> Revisão) precisa de uma reação PERCEPTÍVEL dos blobs, distinta do
+  // loop ambiente de 18s acima -- "o fundo respondeu ao seu clique", não
+  // só "o fundo está sempre se mexendo um pouco". `pathname` como `key` do
+  // container é o gatilho: cada navegação para uma URL diferente remonta
+  // o nó, o que (a) reinicia a keyframe `kick` do zero -- o pulso de
+  // ~0,6s definido em index.css -- e (b) também reinicia o loop `blob` de
+  // cada bolha individual, o que não se nota (a mesma defasagem de
+  // `animation-delay` negativo recompõe o mesmo efeito escalonado a
+  // partir do novo instante zero). Decisão registrada no relatório: CSS
+  // puro via remontagem por `key`, sem dependência nova (Framer Motion
+  // etc.) -- o efeito pedido é um pulso curto, não uma biblioteca de
+  // orquestração de transição de página inteira.
+  const { pathname } = useLocation();
+
   return (
     <div className="relative min-h-full overflow-x-hidden bg-slate-50">
       {/*
@@ -40,7 +56,7 @@ export default function AppShell({ children, largo = false }) {
         independente da opacidade -- os dois precisavam ser corrigidos
         juntos.
       */}
-      <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+      <div key={pathname} className="pointer-events-none fixed inset-0 z-0 animate-kick overflow-hidden">
         <div className="absolute -left-32 -top-32 size-[32rem] animate-blob rounded-full bg-brand-400/90 blur-2xl" />
         <div className="absolute -right-24 top-1/3 size-[28rem] animate-blob rounded-full bg-violet-400/80 blur-2xl [animation-delay:-6s]" />
         <div className="absolute -bottom-32 left-1/4 size-[30rem] animate-blob rounded-full bg-sky-300/85 blur-xl [animation-delay:-11s]" />
