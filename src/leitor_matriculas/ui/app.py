@@ -69,20 +69,20 @@ import ttkbootstrap as tb
 from PIL import Image, ImageTk
 from ttkbootstrap.dialogs import Messagebox
 
-from leitor_matriculas.ocr.image_processor import preprocess_image
-from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
+from leitor_matriculas.ocr.engine import get_ocr_engine
 from leitor_matriculas.dados.data_manager import DataManager
-from leitor_matriculas.dados import registro_correcoes
-from leitor_matriculas.parsing.registro_parser import (
-    CampoOcr,
-    Registro,
-    parse_registros,
-    verificar_contagem_posicoes,
-)
+from leitor_matriculas.parsing.registro_parser import verificar_contagem_posicoes
 from leitor_matriculas.parsing.contexto_lote import ContextoLote
-from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
-from leitor_matriculas.validacao.regras import classificar_registro
-from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
+# Fase 24a (Web MVP): "rodar o pipeline sobre uma folha" (pré-processamento
+# -> OCR -> parser -> reparo DATA+HORA -> classificação) e "confirmar uma
+# revisão manual" deixaram de ser lógica desta classe -- viraram funções
+# neutras em `pipeline.py`/`validacao/confirmacao.py` para que o backend
+# web (que não pode instanciar `App`, que abre uma janela) chame as MESMAS
+# funções em vez de duplicar a decisão. `ui/app.py` a partir daqui só
+# COORDENA: lê os campos dos widgets, chama a função, atualiza o que é
+# tela (tabela, contador, fila, navegação).
+from leitor_matriculas import pipeline
+from leitor_matriculas.validacao.confirmacao import NAO_ENCONTRADO, confirmar_revisao_manual
 from leitor_matriculas.ui import explicacao_revisao
 from leitor_matriculas.ui import mensagens
 from leitor_matriculas.ui import estilos
@@ -101,11 +101,11 @@ EXTENSOES_PDF = [("PDF", "*.pdf")]
 # abertura.
 TEMA = estilos.TEMA_CLARO
 
-# Placeholder explícito para Nome/Cargo/Setor quando a matrícula não pôde
-# ser associada a um colaborador da base — nunca deixamos a célula "vazia
-# aparentemente válida" (requisito funcional definitivo): quem olhar a
-# planilha precisa ver que aquele dado é "não confirmado", não "em branco".
-NAO_ENCONTRADO = "(não encontrado)"
+# NAO_ENCONTRADO (placeholder de Nome/Cargo/Setor quando a matrícula não
+# pôde ser associada a um colaborador da base) mudou de dono na Fase 24a:
+# agora vem de `validacao/confirmacao.py` (importado acima), porque tanto
+# o Tkinter quanto o backend web precisam mostrar exatamente o mesmo
+# texto -- duas cópias da mesma constante um dia divergiriam.
 
 # Ordem de exibição na tabela ao vivo (a ordem obrigatória da planilha
 # final — Data/Hora/Matrícula/Nome/Setor/Motivo/Responsável — é aplicada
@@ -214,46 +214,12 @@ def _comprimir_para_miniatura(imagem_bgr):
         return None
 
 
-def _texto_campo(registro, nome_campo: str) -> str:
-    campo = registro.campos.get(nome_campo)
-    return campo.texto if campo else ""
-
-
-def _reparar_data_hora_mescladas(registros):
-    """
-    PROBLEMA 5 (Fase 1 de precisão da extração): corrige o caso real em que
-    o próprio detector de texto do OCR colou DATA e HORA em uma única caixa
-    (ex.: "14.04 26 20:24" -- visto em teste.jpg). Só age quando exatamente
-    um dos dois campos está ausente; `tentar_separar_data_hora_mesclada`
-    (tempo_parser.py) só aceita a separação se ambos os pedaços validarem
-    de verdade -- nunca inventa. Sem separação segura, o registro segue
-    sem alteração (campo ausente -> REVISAO, como já era o caso).
-    """
-    for registro in registros:
-        tem_data = "data" in registro.campos
-        tem_hora = "hora" in registro.campos
-        if tem_data == tem_hora:
-            continue  # ambos presentes ou ambos ausentes: nada a reparar aqui
-
-        campo_fonte = registro.campos["data"] if tem_data else registro.campos["hora"]
-        resultado = tentar_separar_data_hora_mesclada(campo_fonte.texto)
-        if resultado is None:
-            continue
-
-        texto_data, texto_hora = resultado
-        registro.campos["data"] = CampoOcr(texto=texto_data, confianca=campo_fonte.confianca, box=campo_fonte.box)
-        # `texto_hora` vem None quando a caixa mesclada tinha uma hora
-        # impossível ("14.04 -26 90:24"): a DATA legível é aproveitada e a
-        # HORA (opcional) continua ausente -- o texto impossível nunca vai
-        # para o campo, só para o registro de auditoria logo abaixo.
-        if texto_hora is None:
-            registro.campos.pop("hora", None)
-        else:
-            registro.campos["hora"] = CampoOcr(texto=texto_hora, confianca=campo_fonte.confianca, box=campo_fonte.box)
-        # Preserva o texto mesclado original para auditoria (nunca some).
-        registro.nao_associados.append(
-            CampoOcr(texto=f"[data/hora mescladas no OCR: {campo_fonte.texto!r}]", confianca=campo_fonte.confianca, box=campo_fonte.box)
-        )
+# Fase 24a: movida para `pipeline.reparar_data_hora_mescladas`. O ALIAS
+# abaixo existe só para não quebrar `from leitor_matriculas.ui.app import
+# _reparar_data_hora_mescladas`, que `teste_extracao_fase1.py` já fazia
+# antes desta fase (o teste continua válido -- a função é a mesma, só
+# mudou de arquivo).
+_reparar_data_hora_mescladas = pipeline.reparar_data_hora_mescladas
 
 
 class App(tb.Window):
@@ -1901,17 +1867,23 @@ class App(tb.Window):
     def _processar_uma_pagina(self, imagem_bgr):
         """Devolve (imagem_processada, registros, erro). Nunca levanta exceção.
 
-        As chamadas a `_informar_etapa` são apenas de acompanhamento (Fase
-        21a): descrevem, em português, o passo em que a folha está. Não
-        alteram nenhum resultado nem nenhuma decisão -- só permitem que a
-        tela diga algo mais útil que "Processando...".
-        """
-        self._informar_etapa("Preparando a imagem da folha")
-        try:
-            imagem_processada = preprocess_image(imagem_bgr)
-        except Exception as exc:
-            return None, [], f"Erro no pré-processamento: {exc}"
+        Fase 24a: o corpo do pipeline (pré-processar -> OCR -> parser ->
+        reparo DATA+HORA) morou aqui até esta fase; agora é
+        `pipeline.processar_uma_pagina`, para que o backend web chame a
+        MESMA função sem precisar instanciar `App` (que abre uma janela).
+        O que continua sendo responsabilidade DESTA classe é só o cache do
+        engine (`self._ocr_engine`, reaproveitado entre páginas da mesma
+        sessão) -- o backend web mantém o seu próprio cache, do jeito que
+        fizer sentido para um processo sem Tkinter.
 
+        Efeito colateral cosmético desta extração, registrado por
+        completude: a mensagem "Iniciando o leitor de texto (só na
+        primeira folha)" passa a aparecer ANTES de "Preparando a imagem da
+        folha" na primeira página (antes vinha depois -- ver `saida/
+        avaliacao_fase24_web.md`, seção 24a). `_informar_etapa` é
+        puramente informativo -- não participa de nenhuma decisão -- então
+        a ordem das duas frases não muda nenhum resultado.
+        """
         if self._ocr_engine is None:
             self._informar_etapa("Iniciando o leitor de texto (só na primeira folha)")
             try:
@@ -1919,21 +1891,9 @@ class App(tb.Window):
             except ImportError as exc:
                 return None, [], f"PaddleOCR não instalado: {exc}"
 
-        self._informar_etapa("Lendo o texto escrito à mão (esta é a parte demorada)")
-        try:
-            resultados_ocr = self._ocr_engine.recognize(imagem_processada)
-        except Exception as exc:
-            return imagem_processada, [], f"Erro no OCR: {exc}"
-
-        self._informar_etapa("Organizando as linhas e colunas da folha")
-        try:
-            registros = parse_registros(resultados_ocr).registros
-            _reparar_data_hora_mescladas(registros)
-        except Exception as exc:
-            return imagem_processada, [], f"Erro no parser espacial: {exc}"
-
-        self._informar_etapa("Conferindo os dados contra as bases")
-        return imagem_processada, registros, None
+        return pipeline.processar_uma_pagina(
+            imagem_bgr, self._ocr_engine, informar_etapa=self._informar_etapa
+        )
 
     def _worker_imagem(self, imagem_bgr):
         # Ao contrário de _processar_uma_pagina (que já blinda cada etapa
@@ -2251,15 +2211,18 @@ class App(tb.Window):
     # Registros -> tabela + lista de exportação
     # ==================================================================
     def _registro_erro_pagina(self, numero_pagina, mensagem):
-        return {
-            "data": "", "hora": "", "matricula": "", "nome": "", "cargo": "", "setor": "",
-            "gestor": "", "motivo": "",
-            "pagina_origem": numero_pagina, "status": "ERRO",
-            "confianca_matricula": "", "confianca_gestor": "", "confianca_motivo": "",
-            "observacao": mensagem, "texto_ocr_original": "",
-        }
+        return pipeline.registro_erro_pagina(numero_pagina, mensagem)
 
     def _adicionar_registros(self, numero_pagina, registros):
+        """
+        Fase 24a: a classificação por registro (matrícula -> base -> `clas-
+        sificar_registro` -> dict de exportação) morou aqui até esta fase;
+        agora é `pipeline.montar_registro_exportacao`, chamada idêntica
+        tanto daqui quanto do backend web -- só o que é ESTADO DE TELA
+        (contadores, `_avisos_descarte`, a lista `_registros_exportacao`
+        em si, redesenhar a tabela) continua sendo responsabilidade desta
+        classe.
+        """
         # Contexto do lote ANTES de classificar: as datas completas desta
         # página também valem como evidência para as linhas dela que vieram
         # sem ano. Só entram datas que se interpretam por completo (ver
@@ -2270,114 +2233,23 @@ class App(tb.Window):
             self._contexto_lote.registrar_data(campo_data.texto if campo_data else "")
 
         for registro in registros:
-            campo_matricula = registro.campos.get("matricula")
-            texto_matricula = campo_matricula.texto if campo_matricula else ""
-            # Primeiro as confusões já conhecidas (O->0, I->1, S->5, B->8,
-            # só quando o texto já parece matrícula), depois a recuperação
-            # contextual dos caracteres que sobraram (ex.: "+" -> 7), que
-            # usa a base de colaboradores como evidência.
-            matricula_normalizada = normalizar_matricula(texto_matricula) if texto_matricula else ""
-            resultado_matricula = resolver_matricula(
-                matricula_normalizada,
-                existe_na_base=(
-                    (lambda m: self._data_manager.buscar_colaborador(m) is not None)
-                    if self._data_manager.colaboradores_disponivel else None
-                ),
+            registro_exportacao, aviso_sem_matricula = pipeline.montar_registro_exportacao(
+                registro, numero_pagina, self._data_manager, self._contexto_lote,
             )
-            # A matrícula exibida/exportada é SEMPRE só dígitos (requisito
-            # funcional): quando a recuperação não conseguiu chegar a uma
-            # leitura só-dígitos, a célula sai VAZIA em vez de levar o
-            # texto cru do OCR ("1954+", "195.4"). Nada se perde -- o texto
-            # original continua na coluna técnica de OCR, na Observação e
-            # no aviso "Linhas sem matrícula".
-            matricula_normalizada = resultado_matricula.matricula or ""
-
-            colaborador = None
-            if registro.completo and resultado_matricula.status != "AMBIGUA":
-                colaborador = self._data_manager.buscar_colaborador(matricula_normalizada)
-
-            resultado_classificacao = classificar_registro(
-                registro, colaborador, self._data_manager,
-                resultado_matricula=resultado_matricula,
-                contexto_lote=self._contexto_lote,
-            )
-            status, observacao = resultado_classificacao.status, resultado_classificacao.observacao
-            if status == "CONFIRMADO":
+            if registro_exportacao["status"] == "CONFIRMADO":
                 self._contador_confirmados += 1
             else:
                 self._contador_revisao += 1
-
-            nome = colaborador["nome"] if colaborador else NAO_ENCONTRADO
-            cargo = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
-            setor = colaborador["setor"] if colaborador else NAO_ENCONTRADO
-            # DATA sai sempre no formato canônico dd/mm/aa; quando não pôde
-            # ser interpretada com segurança, a célula sai VAZIA (o registro
-            # já está em REVISAO). Mesma regra da Hora, e pelo mesmo motivo:
-            # escrever "23.04" ou "14.0.4.26" na coluna Data misturaria
-            # formatos na planilha e o valor seria indistinguível de uma
-            # data de verdade. O texto cru do OCR não se perde -- fica na
-            # Observação (ver validacao.validar_data) e na coluna técnica.
-            data_ = resultado_classificacao.data_confirmada or ""
-            # HORA é campo OPCIONAL: só vai para a tabela/planilha quando
-            # pôde ser interpretada com segurança. Ausente ou ilegível, sai
-            # VAZIA -- nunca com o texto ilegível do OCR, que seria
-            # indistinguível de uma hora real. O texto bruto não some: fica
-            # registrado na Observação (ver validacao.avaliar_hora_opcional).
-            hora = resultado_classificacao.hora_confirmada or ""
-            # PROBLEMAS 3/4: quando a correspondência aproximada aceitou uma
-            # correção (ver validacao.py/correspondencia_aproximada.py), usa
-            # o valor normalizado na tabela/planilha; o texto bruto do OCR
-            # continua disponível na Observação quando isso acontece, e como
-            # fallback aqui quando não houve correção nenhuma.
-            gestor = resultado_classificacao.gestor_confirmado or _texto_campo(registro, "gestor")
-            motivo = resultado_classificacao.motivo_confirmado or _texto_campo(registro, "motivo")
-            campo_gestor = registro.campos.get("gestor")
-            campo_motivo = registro.campos.get("motivo")
-
-            conf_matricula = campo_matricula.confianca if campo_matricula else None
 
             # Aviso explícito de linha sem matrícula identificável. O
             # registro NÃO é descartado (vai para REVISAO com o que tem --
             # perder uma liberação real seria pior), mas o operador
             # precisa saber que ela existe e por quê: é a linha que ele
             # terá de conferir no papel.
-            if not resultado_matricula.matricula:
-                self._avisos_descarte.append({
-                    "pagina": numero_pagina,
-                    "mensagem": (
-                        f"linha sem matrícula identificável"
-                        + (f" (OCR leu: '{texto_matricula}')" if texto_matricula else " (coluna vazia)")
-                        + " -- mantida em REVISÃO, nenhuma matrícula foi inventada"
-                    ),
-                })
+            if aviso_sem_matricula:
+                self._avisos_descarte.append({"pagina": numero_pagina, "mensagem": aviso_sem_matricula})
 
-            self._registros_exportacao.append({
-                "data": data_, "hora": hora,
-                "matricula": matricula_normalizada,
-                "nome": nome, "cargo": cargo, "setor": setor,
-                "gestor": gestor, "motivo": motivo,
-                "pagina_origem": numero_pagina, "status": status,
-                "confianca_matricula": conf_matricula,
-                "confianca_gestor": campo_gestor.confianca if campo_gestor else "",
-                "confianca_motivo": campo_motivo.confianca if campo_motivo else "",
-                "observacao": observacao,
-                "texto_ocr_original": texto_matricula,
-                # Texto que o OCR leu nesta linha e o parser não conseguiu
-                # associar a coluna nenhuma. Guardado para a revisão manual
-                # poder rodar a MESMA checagem de integridade do fluxo
-                # automático (ver _revisao_confirmar). Chave técnica: o
-                # xlsx_exporter só lê as colunas que conhece e ignora esta.
-                "ocr_nao_associados": [
-                    c.texto for c in (registro.nao_associados or []) if (c.texto or "").strip()
-                ],
-                # Fase 17 (motor de evidências): o dossiê do registro, em
-                # dados puros. Mesma natureza de chave técnica que
-                # `ocr_nao_associados` acima -- fica no dict de exportação
-                # e FORA das COLUNAS do xlsx_exporter, portanto não aparece
-                # na planilha. Esta fase não expõe evidência ao usuário
-                # final: quem vai consumir isto é a Fase 18.
-                "evidencias": resultado_classificacao.dossie.como_dicionarios(),
-            })
+            self._registros_exportacao.append(registro_exportacao)
 
         self._sincronizar_tabela_principal()
         self._atualizar_botao_revisao()
@@ -3248,121 +3120,31 @@ class App(tb.Window):
         """
         Fase 7 (PROBLEMAS C/D — segurança contra falso CONFIRMADO): esta
         função NÃO marca CONFIRMADO por o operador ter clicado o botão.
-        Ela reconstrói um Registro com os valores digitados e roda a MESMA
-        validação do fluxo automático (`classificar_registro`) -- reutiliza
-        a regra existente, não cria nenhuma nova. Confiança 1.0 nos campos
-        digitados: foram verificados por uma pessoa, deixaram de ser uma
-        hipótese de OCR (não é um valor inventado).
 
-        Fase 10: DATA e HORA passaram a ser editáveis aqui. Antes elas
-        vinham fixas do registro, então uma linha barrada pela data era
-        impossível de resolver dentro do programa.
+        Fase 24a: a decisão em si (reconstruir o Registro sintético, rodar
+        a MESMA `classificar_registro` do fluxo automático, decidir se sai
+        de REVISAO) deixou de morar aqui -- é `validacao.confirmacao.
+        confirmar_revisao_manual` agora, chamada IDÊNTICA tanto pelo
+        Tkinter quanto pelo backend web. O que sobra aqui é só Tkinter
+        puro: ler os campos digitados, chamar a função, e atualizar
+        widget/contador/navegação a partir do resultado.
         """
         indice, registro = self._revisao_registro_atual()
         if registro is None:
             return
 
-        data_digitada = self.revisao_vars["data"].get().strip()
-        hora_digitada = self.revisao_vars["hora"].get().strip()
-        matricula_digitada = self.revisao_vars["matricula"].get().strip()
-        gestor_digitado = self.revisao_vars["gestor"].get().strip()
-        motivo_digitado = self.revisao_vars["motivo"].get().strip()
-
-        # Mesmo tratamento do fluxo automático: a matrícula final só
-        # pode conter dígitos, mesmo vinda de digitação manual.
-        matricula_normalizada = normalizar_matricula(matricula_digitada) if matricula_digitada else ""
-        resultado_matricula = resolver_matricula(
-            matricula_normalizada,
-            existe_na_base=(
-                (lambda m: self._data_manager.buscar_colaborador(m) is not None)
-                if self._data_manager.colaboradores_disponivel else None
-            ),
-        )
-        matricula_normalizada = resultado_matricula.matricula or ""
-
-        campos_sinteticos = {}
-        if data_digitada:
-            campos_sinteticos["data"] = CampoOcr(texto=data_digitada, confianca=1.0, box=None)
-        if hora_digitada:
-            campos_sinteticos["hora"] = CampoOcr(texto=hora_digitada, confianca=1.0, box=None)
-        if matricula_normalizada:
-            campos_sinteticos["matricula"] = CampoOcr(texto=matricula_normalizada, confianca=1.0, box=None)
-        if gestor_digitado:
-            campos_sinteticos["gestor"] = CampoOcr(texto=gestor_digitado, confianca=1.0, box=None)
-        if motivo_digitado:
-            campos_sinteticos["motivo"] = CampoOcr(texto=motivo_digitado, confianca=1.0, box=None)
-        # A evidência de campo perdido detectada no processamento automático
-        # (ver validacao/integridade.py) precisa SOBREVIVER à revisão
-        # manual. Sem isto, o registro sintético nasceria sem
-        # `nao_associados`, a checagem de integridade não teria o que ver, e
-        # bastaria abrir a revisão e clicar em confirmar para transformar em
-        # CONFIRMADO exatamente o registro que a Fase 12 passou a barrar --
-        # uma porta dos fundos para o problema que ela existe para fechar.
-        #
-        # Isto NÃO prende o operador: a checagem só dispara quando o campo
-        # continua VAZIO. Se ele digitar a hora que está no papel, o campo
-        # passa a existir e a evidência deixa de bloquear.
-        sobras = [
-            CampoOcr(texto=texto, confianca=None, box=None)
-            for texto in (registro.get("ocr_nao_associados") or [])
-        ]
-        registro_sintetico = Registro(indice=0, campos=campos_sinteticos, nao_associados=sobras)
-
-        # PROBLEMA C: re-consulta a base pela matrícula corrigida --
-        # Nome/Setor/Cargo têm que refletir a matrícula certa, nunca
-        # ficar mostrando "(não encontrado)" para um registro que
-        # acabou de ser confirmado com uma matrícula válida.
-        colaborador = (
-            self._data_manager.buscar_colaborador(matricula_normalizada) if matricula_normalizada else None
-        )
-
-        resultado = classificar_registro(
-            registro_sintetico, colaborador, self._data_manager,
-            resultado_matricula=resultado_matricula,
+        resultado = confirmar_revisao_manual(
+            registro,
+            data=self.revisao_vars["data"].get(),
+            hora=self.revisao_vars["hora"].get(),
+            matricula=self.revisao_vars["matricula"].get(),
+            gestor=self.revisao_vars["gestor"].get(),
+            motivo=self.revisao_vars["motivo"].get(),
+            data_manager=self._data_manager,
             contexto_lote=self._contexto_lote,
         )
 
-        # Fase 20 (H5): fotografia do estado ANTERIOR, tirada aqui porque as
-        # linhas abaixo sobrescrevem o dict no lugar. Sem esta cópia, o valor
-        # que estava em cada campo antes da correção -- e o dossiê com o
-        # texto que o OCR havia lido em CADA um dos 5 campos -- deixa de
-        # existir no instante seguinte. Foi exatamente essa perda que
-        # impediu as hipóteses H1-H4 desta fase de serem medidas: o único
-        # vestígio de uma sessão real era a planilha exportada, que guarda
-        # só o estado posterior. Copiar não altera nada do fluxo.
-        estado_anterior = dict(registro)
-
-        registro["matricula"] = matricula_normalizada
-        registro["nome"] = colaborador["nome"] if colaborador else NAO_ENCONTRADO
-        registro["cargo"] = colaborador["cargo"] if colaborador else NAO_ENCONTRADO
-        registro["setor"] = colaborador["setor"] if colaborador else NAO_ENCONTRADO
-        registro["data"] = resultado.data_confirmada or ""
-        registro["hora"] = resultado.hora_confirmada or ""
-        registro["gestor"] = resultado.gestor_confirmado or gestor_digitado
-        registro["motivo"] = resultado.motivo_confirmado or motivo_digitado
-        # O dossiê acompanha a REavaliação: depois de uma correção manual,
-        # a evidência que vale é a da decisão que acabou de ser tomada, não
-        # a da leitura original do OCR (que continua registrada dentro do
-        # próprio dossiê, como `ocr_bruto`).
-        registro["evidencias"] = resultado.dossie.como_dicionarios()
-        if matricula_normalizada:
-            registro["confianca_matricula"] = 1.0
-        if gestor_digitado:
-            registro["confianca_gestor"] = 1.0
-        if motivo_digitado:
-            registro["confianca_motivo"] = 1.0
-
-        status_anterior = registro["status"]
-        registro["status"] = resultado.status
-        if resultado.status == "CONFIRMADO":
-            registro["observacao"] = (
-                "corrigido manualmente" if not resultado.observacao
-                else f"corrigido manualmente; {resultado.observacao}"
-            )
-        else:
-            registro["observacao"] = f"revisão manual incompleta -- {resultado.observacao}"
-
-        if resultado.status == "CONFIRMADO" and status_anterior != "CONFIRMADO":
+        if resultado.confirmou_agora:
             self._contador_revisao -= 1
             self._contador_confirmados += 1
             # Sub-fase 21b: numerador do contador "N de M revisados" (área
@@ -3370,27 +3152,11 @@ class App(tb.Window):
             # decide se a linha realmente saiu de REVISAO.
             self._revisao_resolvidos_sessao += 1
 
-        # Fase 20 (H5): grava a correção no histórico -- DEPOIS que a
-        # decisão já foi tomada, e sem participar dela. Nada acima desta
-        # linha consulta o histórico, e nada abaixo depende do resultado
-        # da gravação: `registrar_correcao` já engole as próprias falhas
-        # (disco cheio, arquivo aberto no Excel) e devolve False, pelo
-        # mesmo critério da miniatura da foto na Fase 10 -- perder uma
-        # linha de histórico não pode custar o lote que ainda não foi
-        # exportado. Registra também a correção que NÃO resolveu: uma
-        # tentativa que continuou em REVISAO é evidência tão legítima
-        # quanto uma que confirmou.
-        registro_correcoes.registrar_correcao(
-            antes=estado_anterior,
-            depois=registro,
-            evidencias_antes=estado_anterior.get("evidencias"),
-        )
-
         self._sincronizar_tabela_principal()
         self._atualizar_botao_revisao()
         self._atualizar_status(concluido=not self._processando)
 
-        if resultado.status == "CONFIRMADO":
+        if registro["status"] == "CONFIRMADO":
             # A linha saiu da lista de pendentes: a posição atual passa a
             # apontar para a PRÓXIMA pendente sozinha (a lista encolheu),
             # que é o comportamento desejado ao revisar em sequência.
@@ -3414,7 +3180,7 @@ class App(tb.Window):
             # `_montar_aba_revisao`. Nenhuma mudança de comportamento: o
             # texto é o mesmo que já era escrito aqui.
             self.lbl_revisao_resultado.config(
-                text=f"Ainda não é possível confirmar: {resultado.observacao}",
+                text=f"Ainda não é possível confirmar: {resultado.observacao_classificacao}",
             )
 
     # Nome anterior mantido: o fluxo de correção manual é o mesmo.

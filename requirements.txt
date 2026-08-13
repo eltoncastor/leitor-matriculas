@@ -27,3 +27,14 @@ openpyxl>=3.1.0,<4.0.0
 # instalar no Windows. O módulo importado chama-se "pymupdf" nas versões
 # atuais e "fitz" nas mais antigas; pdf_reader.py já trata os dois nomes.
 PyMuPDF>=1.24.0,<2.0.0
+
+# Fase 24a (Web MVP) — só para quem for rodar o backend web
+# (web/backend/main.py). A versão Tkinter (main.py, na raiz) não usa nada
+# disto; se você só roda o app desktop, pode ignorar as três linhas
+# abaixo. FastAPI expõe leitor_matriculas via HTTP sem reescrever nenhuma
+# lógica de negócio; uvicorn é o servidor ASGI que roda a aplicação;
+# python-multipart é exigido pelo FastAPI para aceitar upload de arquivo
+# (multipart/form-data) nos endpoints de criação de lote.
+fastapi>=0.110.0,<1.0.0
+uvicorn>=0.29.0,<1.0.0
+python-multipart>=0.0.9

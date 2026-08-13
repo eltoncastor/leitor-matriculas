@@ -434,43 +434,82 @@ with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('le
                 "havia miniatura para a pagina, mas a foto nao foi carregada na revisao"
             print("OK: Sub-fase 21b -- foto da folha carregada quando disponivel")
 
-    # A proteção central (Fase 7/12): NENHUM lugar de ui/app.py pode
-    # escrever "CONFIRMADO" à mão em registro["status"]/em um dict de
-    # exportação -- toda atribuição tem que vir do RETORNO de
-    # `classificar_registro` (via a variável `resultado`/`status`, nunca
-    # um literal). Trava estrutural, não só comportamental: mesmo que
-    # alguém adicione um atalho nunca exercitado pelos cenários acima, o
-    # grep abaixo entra em pane.
+    # A proteção central (Fase 7/12): NENHUM lugar do código pode escrever
+    # "CONFIRMADO" à mão em registro["status"]/em um dict de exportação --
+    # toda atribuição tem que vir do RETORNO de `classificar_registro` (via
+    # a variável `resultado`/`status`, nunca um literal). Trava estrutural,
+    # não só comportamental: mesmo que alguém adicione um atalho nunca
+    # exercitado pelos cenários acima, o grep abaixo entra em pane.
+    #
+    # Fase 24a (Web MVP): a decisão (a reatribuição de status) e a
+    # montagem do dict de exportação deixaram de morar em ui/app.py --
+    # migraram para validacao/confirmacao.py (`confirmar_revisao_manual`,
+    # chamada tanto pelo Tkinter quanto pelo backend web) e pipeline.py
+    # (`montar_registro_exportacao`/`registro_erro_pagina`, idem). A trava
+    # estrutural agora verifica os TRÊS arquivos: ui/app.py não pode conter
+    # NENHUMA das duas formas (a lógica saiu de lá por completo -- só
+    # resta a CHAMADA para a função compartilhada), e cada literal
+    # legítimo precisa estar exatamente no módulo novo, exatamente uma vez.
     caminho_app = os.path.join(os.path.dirname(__file__), "..", "src",
                                 "leitor_matriculas", "ui", "app.py")
+    caminho_confirmacao = os.path.join(os.path.dirname(__file__), "..", "src",
+                                        "leitor_matriculas", "validacao", "confirmacao.py")
+    caminho_pipeline = os.path.join(os.path.dirname(__file__), "..", "src",
+                                     "leitor_matriculas", "pipeline.py")
     with open(caminho_app, encoding="utf-8") as _fh:
         codigo_app = _fh.read()
+    with open(caminho_confirmacao, encoding="utf-8") as _fh:
+        codigo_confirmacao = _fh.read()
+    with open(caminho_pipeline, encoding="utf-8") as _fh:
+        codigo_pipeline = _fh.read()
     import re as _re
-    assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', codigo_app), \
-        "ui/app.py escreve 'CONFIRMADO' na marra em registro['status'] -- atalho proibido"
-    assert not _re.search(r'"status"\s*:\s*"CONFIRMADO"', codigo_app), \
-        "ui/app.py escreve 'CONFIRMADO' na marra num dict literal -- atalho proibido"
-    # Os dois (e só os dois) caminhos legítimos que escrevem o status de um
-    # registro: a classificação automática (_adicionar_registros, monta o
-    # dict a partir da variável `status`) e `_revisao_confirmar`
-    # (reatribui a partir de `resultado.status`). Um terceiro caminho
-    # aparecendo aqui quebra esta trava de propósito, para ser notado.
-    reatribuicoes = _re.findall(r'registro\["status"\]\s*=(?!=)\s*([^\n]+)', codigo_app)
-    assert reatribuicoes == ["resultado.status"], (
-        f"esperava exatamente 1 reatribuicao de registro['status'] (em "
-        f"_revisao_confirmar, vinda de resultado.status); encontrado: {reatribuicoes}"
+
+    for _nome, _codigo in (("ui/app.py", codigo_app),
+                            ("validacao/confirmacao.py", codigo_confirmacao),
+                            ("pipeline.py", codigo_pipeline)):
+        assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', _codigo), \
+            f"{_nome} escreve 'CONFIRMADO' na marra em registro['status'] -- atalho proibido"
+        assert not _re.search(r'"status"\s*:\s*"CONFIRMADO"', _codigo), \
+            f"{_nome} escreve 'CONFIRMADO' na marra num dict literal -- atalho proibido"
+
+    # ui/app.py não decide mais status nenhum -- a lógica saiu inteira.
+    assert _re.findall(r'registro\["status"\]\s*=(?!=)\s*([^\n]+)', codigo_app) == [], (
+        "ui/app.py voltou a reatribuir registro['status'] diretamente -- "
+        "deveria delegar inteiramente para confirmar_revisao_manual"
     )
-    # Só os dicts que MONTAM um registro (têm "pagina_origem" ao lado) --
-    # não os de layout (CABECALHOS_TABELA/LARGURAS_TABELA, que também têm
-    # a chave "status", mas para largura/rótulo de coluna).
-    dicts_de_registro = _re.findall(r'"pagina_origem":[^\n]*"status":\s*(\w+|"ERRO")', codigo_app)
+    assert _re.findall(r'"pagina_origem":[^\n]*"status":\s*(\w+|"ERRO")', codigo_app) == [], (
+        "ui/app.py voltou a montar um dict de registro diretamente -- "
+        "deveria delegar inteiramente para pipeline.montar_registro_exportacao"
+    )
+    # Prova de que ui/app.py de fato PASSA pelos módulos novos (não é só
+    # ausência de atalho -- é presença da chamada certa).
+    assert "confirmar_revisao_manual(" in codigo_app, \
+        "_revisao_confirmar deveria chamar validacao.confirmacao.confirmar_revisao_manual"
+    assert "pipeline.montar_registro_exportacao(" in codigo_app, \
+        "_adicionar_registros deveria chamar pipeline.montar_registro_exportacao"
+
+    # O único caminho legítimo de reatribuição manual: dentro de
+    # validacao/confirmacao.py, vindo de `resultado.status` (o retorno de
+    # `classificar_registro`), nunca um literal.
+    reatribuicoes = _re.findall(r'registro\["status"\]\s*=(?!=)\s*([^\n]+)', codigo_confirmacao)
+    assert reatribuicoes == ["resultado.status"], (
+        f"esperava exatamente 1 reatribuicao de registro['status'] em "
+        f"validacao/confirmacao.py (vinda de resultado.status); encontrado: {reatribuicoes}"
+    )
+
+    # Os dois dicts que MONTAM um registro (têm "pagina_origem" ao lado)
+    # moram em pipeline.py agora: a classificação automática (monta o
+    # dict a partir da variável `status`) e a linha ERRO de página.
+    dicts_de_registro = _re.findall(r'"pagina_origem":[^\n]*"status":\s*(\w+|"ERRO")', codigo_pipeline)
     assert sorted(dicts_de_registro) == sorted(["status", '"ERRO"']), (
         f"esperava exatamente os 2 dicts de registro conhecidos (classificacao "
-        f"automatica com 'status': status, e a linha ERRO de falha de pagina); "
-        f"encontrado: {dicts_de_registro}"
+        f"automatica com 'status': status, e a linha ERRO de falha de pagina) em "
+        f"pipeline.py; encontrado: {dicts_de_registro}"
     )
-    print("OK: Sub-fase 21b -- _revisao_confirmar continua o UNICO caminho para "
-          "sair de REVISAO (nenhum atalho grava 'CONFIRMADO' na marra)")
+    print("OK: Sub-fase 24a -- confirmar_revisao_manual (validacao/confirmacao.py) e "
+          "pipeline.montar_registro_exportacao continuam os UNICOS caminhos que decidem "
+          "'status' -- ui/app.py só chama, nunca decide (nenhum atalho grava 'CONFIRMADO' "
+          "na marra em nenhum dos três arquivos)")
 
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()

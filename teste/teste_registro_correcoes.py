@@ -190,18 +190,39 @@ print("OK: caminho padrão resolve para <raiz>/dados/correcoes_humanas.jsonl")
 
 # ---------------------------------------------------------------------------
 # 8. O módulo não é lido por ninguém do fluxo de decisão (REVERSIBILIDADE)
+#
+# Fase 24a (Web MVP): a gravação em si (`registrar_correcao`) deixou de
+# morar em `ui/app.py` -- migrou para `validacao/confirmacao.py`
+# (`confirmar_revisao_manual`), o único caminho de confirmação manual que
+# TANTO o Tkinter QUANTO o backend web chamam agora. A garantia que este
+# bloco protege não mudou (a interface só GRAVA, nunca LÊ o histórico) --
+# só passou a ser checada no lugar novo onde a gravação de fato acontece,
+# mais a prova de que cada interface passa por ELE (não duplica a chamada).
 # ---------------------------------------------------------------------------
 raiz_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
 for modulo in ("validacao/regras.py", "validacao/evidencias.py",
-               "exportacao/xlsx_exporter.py", "parsing/registro_parser.py"):
+               "exportacao/xlsx_exporter.py", "parsing/registro_parser.py",
+               "pipeline.py"):
     with open(os.path.join(raiz_src, "leitor_matriculas", modulo), encoding="utf-8") as fh:
         assert "registro_correcoes" not in fh.read(), modulo
+print("OK: nenhum módulo de decisão/classificação importa o histórico")
+
+with open(os.path.join(raiz_src, "leitor_matriculas", "validacao", "confirmacao.py"), encoding="utf-8") as fh:
+    conteudo_confirmacao = fh.read()
+assert "registrar_correcao" in conteudo_confirmacao
+assert "ler_correcoes" not in conteudo_confirmacao
+print("OK: a gravação mora em validacao/confirmacao.py (o único caminho de confirmação manual)")
+
 with open(os.path.join(raiz_src, "leitor_matriculas", "ui", "app.py"), encoding="utf-8") as fh:
     conteudo_app = fh.read()
-# A interface só GRAVA. Ler o histórico (ler_correcoes) em qualquer ponto do
-# fluxo seria transformar coleta em decisão -- que é o que esta fase não faz.
-assert "registrar_correcao" in conteudo_app
+# A interface não grava mais DIRETO -- chama `confirmar_revisao_manual`,
+# que grava por ela. Continua não lendo o histórico em nenhum ponto.
+assert "confirmar_revisao_manual" in conteudo_app
+assert "registrar_correcao" not in conteudo_app, (
+    "ui/app.py voltou a chamar registrar_correcao diretamente -- duplicaria "
+    "a gravação em vez de passar por confirmar_revisao_manual"
+)
 assert "ler_correcoes" not in conteudo_app
-print("OK: nenhum módulo de decisão importa o histórico; a UI só grava, nunca lê")
+print("OK: a UI só aciona a gravação através de confirmar_revisao_manual, nunca lê o histórico")
 
 print("\nTodos os testes de registro de correções humanas passaram.")
