@@ -552,4 +552,140 @@ with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
 
     app_resp.destroy()
 
+# ==========================================================================
+# Sub-fase 21d -- filtro por tipo de pendência, busca textual e atalhos de
+# teclado (← →, Esc) na lista de pendências da Revisão. Os dois primeiros
+# só decidem o que APARECE na lista; nenhum dos três pode alterar status
+# de registro nenhum nem mexer em `_indices_pendentes_revisao()` (a lista
+# de verdade, que Anterior/Próximo continuam percorrendo por inteiro).
+# ==========================================================================
+
+
+def _evidencia_bloqueante(campo):
+    return {"campo": campo, "tipo": "regra", "resultado": "DUVIDA",
+            "motivo": f"{campo} não identificado", "valor_observado": None,
+            "valor_relacionado": None, "origem": "teste"}
+
+
+with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
+     patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
+     patch("leitor_matriculas.ui.app.messagebox.showinfo"):
+    app_21d = App()
+    registros_21d = [
+        {"pagina_origem": 1, "status": "REVISAO", "data": "", "hora": "11:00",
+         "matricula": "11111", "nome": "", "setor": "", "motivo": "RH",
+         "gestor": "Gestor X", "cargo": "", "confianca_matricula": None,
+         "confianca_gestor": 0.9, "confianca_motivo": 0.9,
+         "observacao": "data não identificada", "evidencias": [_evidencia_bloqueante("data")]},
+        {"pagina_origem": 1, "status": "REVISAO", "data": "23/04/26", "hora": "11:05",
+         "matricula": "22222", "nome": "", "setor": "", "motivo": "RH",
+         "gestor": "Rubrica Ilegível", "cargo": "", "confianca_matricula": 0.95,
+         "confianca_gestor": None, "confianca_motivo": 0.9,
+         "observacao": "responsável não reconhecido", "evidencias": [_evidencia_bloqueante("gestor")]},
+        {"pagina_origem": 2, "status": "REVISAO", "data": "23/04/26", "hora": "11:10",
+         "matricula": "", "nome": "", "setor": "", "motivo": "RH",
+         "gestor": "Gestor X", "cargo": "", "confianca_matricula": None,
+         "confianca_gestor": 0.9, "confianca_motivo": 0.9,
+         "observacao": "matrícula não identificada", "evidencias": [_evidencia_bloqueante("matricula")]},
+    ]
+    app_21d._registros_exportacao = [dict(r) for r in registros_21d]
+    app_21d._sincronizar_tabela_principal()
+    app_21d._atualizar_painel_revisao()
+
+    pendentes_completo = app_21d._indices_pendentes_revisao()
+    assert len(pendentes_completo) == 3, pendentes_completo
+
+    # -------- Filtro por tipo: só afeta o que aparece na lista ----------
+    app_21d.revisao_filtro_tipo_var.set("Responsável")
+    app_21d._atualizar_lista_revisao_pendencias()
+    linhas_mostradas = app_21d.tabela_revisao_lista.get_children()
+    assert len(linhas_mostradas) == 1, f"filtro Responsável deveria mostrar 1 linha, mostrou {len(linhas_mostradas)}"
+    indice_mostrado = pendentes_completo[int(linhas_mostradas[0])]
+    assert app_21d._registros_exportacao[indice_mostrado]["matricula"] == "22222"
+    # O filtro NUNCA muda a lista de verdade nem o status de ninguém.
+    assert app_21d._indices_pendentes_revisao() == pendentes_completo
+    assert all(r["status"] == "REVISAO" for r in app_21d._registros_exportacao)
+    print("OK: Sub-fase 21d -- filtro por tipo de pendência mostra só o subconjunto certo, "
+          "sem alterar status nem a lista de pendentes real")
+
+    # -------- Busca textual: por matrícula -------------------------------
+    app_21d.revisao_filtro_tipo_var.set("Todas")
+    app_21d._revisao_busca_placeholder_ativo = False  # simula operador já tendo digitado
+    app_21d.revisao_busca_var.set("11111")
+    linhas_busca = app_21d.tabela_revisao_lista.get_children()
+    assert len(linhas_busca) == 1, f"busca '11111' deveria achar 1 linha, achou {len(linhas_busca)}"
+    indice_busca = pendentes_completo[int(linhas_busca[0])]
+    assert app_21d._registros_exportacao[indice_busca]["matricula"] == "11111"
+    assert app_21d._indices_pendentes_revisao() == pendentes_completo
+    print("OK: Sub-fase 21d -- busca textual por matrícula mostra só a linha certa, "
+          "sem alterar a lista de pendentes real")
+
+    # -------- Placeholder nunca é tratado como termo de busca -------------
+    app_21d._ativar_placeholder_busca_revisao()
+    assert app_21d._texto_busca_revisao() == "", \
+        "o texto do placeholder nao pode ser usado como termo de busca"
+    app_21d._atualizar_lista_revisao_pendencias()
+    assert len(app_21d.tabela_revisao_lista.get_children()) == 3, \
+        "com o placeholder ativo (sem busca real), as 3 pendencias devem aparecer"
+
+    # -------- Esc limpa a busca -- não confirma nada ----------------------
+    # `event_generate` não é confiável neste ambiente para eventos de
+    # teclado: a máquina tem um bug pré-existente e independente desta
+    # sub-fase em que o popdown interno de QUALQUER Combobox da tela rouba
+    # o foco de teclado sintético assim que existe um Combobox na árvore
+    # (reproduz-se até com `bind_all` genérico, sem nenhum código desta
+    # sub-fase envolvido -- ver relatório). Por isso o teste verifica os
+    # dois pedaços que garantem o atalho de verdade: (1) a sequência está
+    # REALMENTE amarrada ao handler certo (consulta a própria ligação do
+    # Tk, não confia em simular a tecla); (2) o handler faz o que deveria
+    # ao ser chamado (o mesmo código que o Tk chamaria de verdade).
+    assert "_on_escape_busca_revisao" in str(app_21d.entrada_revisao_busca.bind("<Escape>")), \
+        "a tecla Esc no campo de busca nao esta amarrada ao handler esperado"
+    app_21d._revisao_busca_placeholder_ativo = False
+    app_21d.revisao_busca_var.set("22222")
+    app_21d._on_escape_busca_revisao()
+    app_21d.update()
+    assert app_21d._texto_busca_revisao() == "", "Esc deveria ter limpado a busca"
+    assert app_21d._indices_pendentes_revisao() == pendentes_completo
+    assert all(r["status"] == "REVISAO" for r in app_21d._registros_exportacao), \
+        "Esc na busca nao pode confirmar nem alterar status de registro nenhum"
+    print("OK: Sub-fase 21d -- Esc limpa a busca sem confirmar nem alterar nenhum registro")
+
+    # -------- ← → navegam a lista (mesma ação de Anterior/Próximo) --------
+    # Mesma ressalva do bloco acima quanto a `event_generate`: confirma a
+    # ligação real no Tk e então exercita exatamente o callback que ela
+    # chamaria (`lambda _e: self._revisao_navegar(...)`).
+    assert "_on_seta_direita_revisao" in str(app_21d.tabela_revisao_lista.bind("<Right>")), \
+        "a seta direita na lista de pendências nao esta amarrada ao handler esperado"
+    assert "_on_seta_esquerda_revisao" in str(app_21d.tabela_revisao_lista.bind("<Left>")), \
+        "a seta esquerda na lista de pendências nao esta amarrada ao handler esperado"
+    app_21d._revisao_ir_para(0)
+    app_21d.update()
+    posicao_antes = app_21d._revisao_posicao
+    app_21d._revisao_navegar(1)  # o mesmo que a seta direita dispara
+    assert app_21d._revisao_posicao == (posicao_antes + 1) % len(pendentes_completo), (
+        f"seta direita deveria avançar a posição (antes={posicao_antes}, "
+        f"depois={app_21d._revisao_posicao})"
+    )
+    app_21d._revisao_navegar(-1)  # o mesmo que a seta esquerda dispara
+    assert app_21d._revisao_posicao == posicao_antes, "seta esquerda deveria voltar a posição"
+    assert app_21d._indices_pendentes_revisao() == pendentes_completo
+    assert all(r["status"] == "REVISAO" for r in app_21d._registros_exportacao), \
+        "navegar com as setas nao pode confirmar nem alterar status de registro nenhum"
+    print("OK: Sub-fase 21d -- ← → navegam a lista de pendências como Anterior/Próximo, "
+          "sem confirmar nada")
+
+    # -------- Nenhuma aba "Configurações" foi criada -----------------------
+    # Auditoria da 21d: não existe nenhuma opção real de usuário para
+    # expor (nenhuma infraestrutura de preferências no projeto -- ver
+    # relatório). Trava estrutural: o Notebook continua com as mesmas 4
+    # abas de sempre.
+    nomes_abas = [app_21d.abas.tab(aba, "text") for aba in app_21d.abas.tabs()]
+    assert len(nomes_abas) == 4, f"esperava 4 abas, achou {nomes_abas}"
+    assert not any("config" in n.lower() for n in nomes_abas), \
+        f"uma aba de Configurações foi criada sem opcao real por tras: {nomes_abas}"
+    print("OK: Sub-fase 21d -- nenhuma aba de Configurações decorativa foi criada")
+
+    app_21d.destroy()
+
 print("TESTE DE INTEGRACAO UI COMPLETO: OK")

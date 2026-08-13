@@ -158,6 +158,17 @@ CORES_TIPO_PENDENCIA = {
 }
 COR_TIPO_PENDENCIA_PADRAO = "#495057"
 
+# Sub-fase 21d: filtro por tipo de pendência na lista de Revisão. O rótulo
+# mostrado no Combobox é o mesmo de `explicacao_revisao.ROTULOS`
+# ("Responsável", "Data", ...); este dicionário faz o caminho inverso
+# (rótulo -> chave do campo) para comparar contra `campos_bloqueantes`.
+FILTRO_REVISAO_TODAS = "Todas"
+ROTULOS_REVISAO_INVERTIDO = {v: k for k, v in explicacao_revisao.ROTULOS.items()}
+# Texto de apoio (placeholder) do campo de busca -- ttk não tem
+# placeholder nativo, então o texto é escrito/apagado manualmente
+# conforme o campo ganha/perde foco (ver `_ativar_placeholder_busca_revisao`).
+PLACEHOLDER_BUSCA_REVISAO = "Buscar por matrícula, responsável, motivo ou página..."
+
 # Maior dimensão guardada da foto de cada página para a aba de Revisão.
 # A foto é guardada JÁ COMPRIMIDA em JPEG (bytes), não como matriz: um
 # lote real de ~50 folhas em matriz numpy passaria de 1 GB de RAM, enquanto
@@ -876,6 +887,55 @@ class App(tb.Window):
         )
         self.lbl_revisao_progresso.pack(side="top", fill="x", pady=(0, 6))
 
+        # Sub-fase 21d: filtro por tipo de pendência + busca textual --
+        # necessidade real medida nas Fases 9/16/18 (Responsável é o maior
+        # grupo de pendência real, 10-11 de 21 linhas nas 5 folhas reais) e
+        # confirmada de novo pela 21b (13 das 21 linhas do lote real têm
+        # sinal de contexto de Responsável). Um lote de 50 folhas pode
+        # facilmente passar de 100 pendências -- revisar "todas as de
+        # Responsável em sequência" (ou achar a matrícula 27325 sem rolar a
+        # lista à mão) é produtividade real, não especulação. Os dois só
+        # controlam o que APARECE e pode ser CLICADO nesta lista -- nunca
+        # alteram `_indices_pendentes_revisao()` nem o que
+        # Anterior/Próximo percorrem (ver `_atualizar_lista_revisao_pendencias`).
+        controles_lista = ttk.Frame(moldura_lista)
+        controles_lista.pack(side="top", fill="x", pady=(0, 6))
+        ttk.Label(controles_lista, text="Tipo:", bootstyle="secondary").grid(
+            row=0, column=0, sticky="w", padx=(0, 4)
+        )
+        self.revisao_filtro_tipo_var = tk.StringVar(value=FILTRO_REVISAO_TODAS)
+        valores_filtro = [FILTRO_REVISAO_TODAS] + list(explicacao_revisao.ROTULOS.values())
+        self.combo_revisao_filtro_tipo = ttk.Combobox(
+            controles_lista, textvariable=self.revisao_filtro_tipo_var,
+            values=valores_filtro, state="readonly", width=13,
+        )
+        self.combo_revisao_filtro_tipo.grid(row=0, column=1, sticky="ew")
+        self.combo_revisao_filtro_tipo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._atualizar_lista_revisao_pendencias()
+        )
+        controles_lista.columnconfigure(1, weight=1)
+
+        self.revisao_busca_var = tk.StringVar()
+        self.entrada_revisao_busca = ttk.Entry(
+            controles_lista, textvariable=self.revisao_busca_var,
+        )
+        self.entrada_revisao_busca.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        # Placeholder simples (ttk não tem placeholder nativo): o texto de
+        # apoio some assim que o operador clicar dentro do campo.
+        self._revisao_busca_placeholder_ativo = False
+        self._ativar_placeholder_busca_revisao()
+        self.entrada_revisao_busca.bind("<FocusIn>", self._on_foco_busca_revisao)
+        self.entrada_revisao_busca.bind("<FocusOut>", self._on_saida_busca_revisao)
+        # Esc limpa a busca -- convenção segura e bem conhecida (nunca
+        # confirma nada, só descarta o texto de filtro).
+        self.entrada_revisao_busca.bind("<Escape>", self._on_escape_busca_revisao)
+        self.revisao_busca_var.trace_add("write", lambda *_a: self._atualizar_lista_revisao_pendencias())
+
+        self.lbl_revisao_lista_contagem = ttk.Label(
+            moldura_lista, text="", bootstyle="secondary",
+        )
+        self.lbl_revisao_lista_contagem.pack(side="top", fill="x", pady=(0, 4))
+
         moldura_lista_tabela = ttk.Frame(moldura_lista)
         moldura_lista_tabela.pack(side="top", fill="both", expand=True)
         self.tabela_revisao_lista = ttk.Treeview(
@@ -903,6 +963,16 @@ class App(tb.Window):
         # ação que "Próximo"/"Anterior" fazem, só que por escolha, não em
         # sequência.
         self.tabela_revisao_lista.bind("<<TreeviewSelect>>", self._on_selecionar_pendencia_lista)
+        # Sub-fase 21d: ← → como atalho de "Anterior"/"Próximo" -- só
+        # ativo quando a LISTA tem o foco (não o formulário), então nunca
+        # interfere com o cursor de texto dentro de Data/Hora/Matrícula
+        # (onde ← → precisam continuar movendo o cursor normalmente). ↑ ↓
+        # já navegam por padrão do próprio Treeview (mudam a seleção, que
+        # já dispara `_on_selecionar_pendencia_lista`) -- não precisou de
+        # binding novo. Nunca confirma nada: só chama a mesma
+        # `_revisao_navegar` que os botões já chamam.
+        self.tabela_revisao_lista.bind("<Left>", self._on_seta_esquerda_revisao)
+        self.tabela_revisao_lista.bind("<Right>", self._on_seta_direita_revisao)
 
         # ---- área 2: a foto da folha ------------------------------------
         # Padding menor de propósito (ESPACO_SM, não ESPACO_MD como as
@@ -2275,15 +2345,57 @@ class App(tb.Window):
         sufixo = f"\n{len(pendentes)} pendente(s) agora" if pendentes else ""
         self.lbl_revisao_progresso.config(text=(texto + sufixo) if texto else "")
 
+    def _texto_busca_revisao(self) -> str:
+        """O texto de busca digitado, ou '' quando o campo só mostra o
+        placeholder (nunca trata o placeholder como termo de busca)."""
+        if not hasattr(self, "revisao_busca_var") or self._revisao_busca_placeholder_ativo:
+            return ""
+        return self.revisao_busca_var.get().strip()
+
+    def _registro_passa_filtro_revisao(self, registro, campos_bloqueantes, termo_busca: str) -> bool:
+        """
+        Sub-fase 21d: filtro de TIPO (campo bloqueante) + busca textual --
+        os dois só decidem o que APARECE nesta lista. Nunca tocam
+        `_indices_pendentes_revisao()`, nunca mudam status, nunca alteram
+        o que Anterior/Próximo percorrem (ver o comentário no ponto onde
+        os controles são montados).
+        """
+        if hasattr(self, "revisao_filtro_tipo_var"):
+            rotulo_filtro = self.revisao_filtro_tipo_var.get()
+            if rotulo_filtro != FILTRO_REVISAO_TODAS:
+                campo_filtro = ROTULOS_REVISAO_INVERTIDO.get(rotulo_filtro)
+                if campo_filtro not in campos_bloqueantes:
+                    return False
+
+        if termo_busca:
+            alvo = " ".join(str(registro.get(chave) or "") for chave in
+                             ("matricula", "gestor", "motivo", "pagina_origem", "nome"))
+            if termo_busca.lower() not in alvo.lower():
+                return False
+
+        return True
+
     def _atualizar_lista_revisao_pendencias(self, pendentes=None):
         """Reconstrói a lista de pendências (área 1) a partir de
         `_registros_exportacao` -- a mesma fonte de verdade da tabela
         principal. Cada linha mostra a página, a matrícula (quando lida) e
-        o(s) campo(s) que bloqueiam, coloridos por tipo."""
+        o(s) campo(s) que bloqueiam, coloridos por tipo.
+
+        Sub-fase 21d: o filtro de tipo e a busca textual (se ativos) só
+        decidem quais dessas linhas são INSERIDAS na tabela -- o `iid` de
+        cada linha continua sendo a posição REAL em `pendentes` (a lista
+        completa, nunca a filtrada), então clicar numa linha visível ainda
+        resolve certo em `_on_selecionar_pendencia_lista`, e
+        Anterior/Próximo continuam percorrendo TODAS as pendências, não só
+        as que passam no filtro -- combinar as duas coisas exigiria
+        redefinir o que "próximo" significa, fora do que um filtro de
+        apresentação pode fazer."""
         if pendentes is None:
             pendentes = self._indices_pendentes_revisao()
         tabela = self.tabela_revisao_lista
         tabela.delete(*tabela.get_children())
+        termo_busca = self._texto_busca_revisao()
+        mostradas = 0
         for posicao, indice in enumerate(pendentes):
             registro = self._registros_exportacao[indice]
             try:
@@ -2293,6 +2405,8 @@ class App(tb.Window):
                 campos = explicacao.campos_bloqueantes
             except Exception:
                 campos = []
+            if not self._registro_passa_filtro_revisao(registro, campos, termo_busca):
+                continue
             if campos:
                 pendencia = ", ".join(explicacao_revisao.ROTULOS.get(c, c) for c in campos)
                 tag = campos[0]
@@ -2305,10 +2419,54 @@ class App(tb.Window):
                 values=(registro.get("pagina_origem"), matricula, pendencia),
                 tags=(tag,),
             )
+            mostradas += 1
+
+        if hasattr(self, "lbl_revisao_lista_contagem"):
+            if mostradas == len(pendentes):
+                self.lbl_revisao_lista_contagem.config(text="")
+            else:
+                self.lbl_revisao_lista_contagem.config(
+                    text=f"{mostradas} de {len(pendentes)} pendência(s) mostradas"
+                )
+
         iid_atual = str(self._revisao_posicao)
         if tabela.exists(iid_atual):
             tabela.selection_set(iid_atual)
             tabela.see(iid_atual)
+
+    # ------------------------------------------------------------------
+    # Placeholder e atalhos do campo de busca (Sub-fase 21d)
+    # ------------------------------------------------------------------
+    def _ativar_placeholder_busca_revisao(self):
+        """Escreve o texto de apoio em cinza -- nunca um termo de busca de
+        verdade (ver `_texto_busca_revisao`)."""
+        self._revisao_busca_placeholder_ativo = True
+        self.revisao_busca_var.set(PLACEHOLDER_BUSCA_REVISAO)
+        try:
+            self.entrada_revisao_busca.config(bootstyle="secondary")
+        except Exception:
+            pass
+
+    def _on_foco_busca_revisao(self, _evento=None):
+        if self._revisao_busca_placeholder_ativo:
+            self._revisao_busca_placeholder_ativo = False
+            self.revisao_busca_var.set("")
+            try:
+                self.entrada_revisao_busca.config(bootstyle="default")
+            except Exception:
+                pass
+
+    def _on_saida_busca_revisao(self, _evento=None):
+        if not self.revisao_busca_var.get().strip():
+            self._ativar_placeholder_busca_revisao()
+
+    def _on_escape_busca_revisao(self, _evento=None):
+        """Esc limpa a busca -- convenção segura: só descarta texto de
+        filtro, nunca confirma nem altera nenhum registro. Tira o foco do
+        campo (dispara `_on_saida_busca_revisao`, que reescreve o
+        placeholder) em vez de reescrevê-lo aqui também."""
+        self.revisao_busca_var.set("")
+        self.tabela_revisao_lista.focus_set()
 
     def _on_selecionar_pendencia_lista(self, _evento=None):
         """Clicar numa linha da lista de pendências navega direto para
@@ -2323,6 +2481,16 @@ class App(tb.Window):
             return
         if posicao != self._revisao_posicao:
             self._revisao_ir_para(posicao)
+
+    # Sub-fase 21d: atalhos ← → na lista de pendências. Métodos nomeados
+    # (não lambdas) só para a ligação ficar identificável ao inspecionar o
+    # binding do Tk -- o comportamento é exatamente `_revisao_navegar`, o
+    # mesmo que os botões "Anterior"/"Próximo" já chamavam.
+    def _on_seta_esquerda_revisao(self, _evento=None):
+        self._revisao_navegar(-1)
+
+    def _on_seta_direita_revisao(self, _evento=None):
+        self._revisao_navegar(1)
 
     def _alternar_detalhes_revisao(self):
         """'Ver detalhes' -- só mostra/esconde o painel com a cadeia
