@@ -84,6 +84,7 @@ from leitor_matriculas.validacao.regras import classificar_registro
 from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
 from leitor_matriculas.ui import explicacao_revisao
 from leitor_matriculas.ui import mensagens
+from leitor_matriculas.ui import estilos
 from leitor_matriculas.ocr import pdf_reader
 from leitor_matriculas.exportacao import xlsx_exporter
 
@@ -122,10 +123,17 @@ CABECALHOS_TABELA = {
 # Observação, que é a ÚLTIMA coluna e justamente a que diz por que a linha
 # precisa de revisão, nasce fora da tela e só aparece se o operador rolar
 # na horizontal (foi o que aconteceu na primeira versão desta tela).
+#
+# Sub-fase 21c: "status" cresceu (116→190) para caber o vocabulário
+# completo ("✕ Erro no processamento", o mais longo dos três -- ver
+# `ui/estilos.py`) sem cortar texto; a diferença saiu de três colunas
+# secundárias/técnicas (setor, cargo, confiança), que continuam legíveis
+# e mantêm a soma igual à de antes -- a tabela continua cabendo na janela
+# no tamanho padrão.
 LARGURAS_TABELA = {
-    "pagina": 46, "status": 116, "data": 74, "hora": 56, "matricula": 84,
-    "nome": 172, "setor": 124, "motivo": 122, "gestor": 128, "cargo": 118,
-    "confianca": 72, "observacao": 280,
+    "pagina": 46, "status": 190, "data": 74, "hora": 56, "matricula": 84,
+    "nome": 172, "setor": 104, "motivo": 122, "gestor": 128, "cargo": 80,
+    "confianca": 56, "observacao": 280,
 }
 # Altura das linhas da tabela. O padrão do ttk aperta demais as linhas para
 # uma tabela que se lê durante uma hora de lote.
@@ -356,7 +364,7 @@ class App(tb.Window):
         entrada = ttk.Frame(cabecalho)
         entrada.pack(side="left")
 
-        ttk.Label(entrada, text="Leitor de Matrículas", font=("", 12, "bold")).pack(
+        ttk.Label(entrada, text="Leitor de Matrículas", font=estilos.FONTE_TITULO_CABECALHO).pack(
             side="left", padx=(0, 16)
         )
 
@@ -420,7 +428,7 @@ class App(tb.Window):
         self.abas.add(aba, text="Início")
         self._aba_inicio = aba
 
-        ttk.Label(aba, text="Leitor de Matrículas", font=("", 19, "bold")).pack(anchor="w")
+        ttk.Label(aba, text="Leitor de Matrículas", font=estilos.FONTE_TITULO_PAGINA).pack(anchor="w")
         ttk.Label(
             aba,
             text="Transforma as folhas de liberação — fotografadas ou em PDF — numa planilha conferida.",
@@ -444,10 +452,10 @@ class App(tb.Window):
         # É o que responde "acabou?" sem o operador ter de reparar que uma
         # barra sumiu ou que uma palavra mudou no rodapé.
         self.lbl_inicio_concluido = ttk.Label(
-            cartao, text="", bootstyle="success", font=("", 13, "bold"),
+            cartao, text="", bootstyle="success", font=estilos.FONTE_TITULO_SECAO,
         )
 
-        acoes = ttk.Labelframe(cartao, text="O que você quer fazer?", padding=16)
+        acoes = ttk.Labelframe(cartao, text="O que você quer fazer?", padding=estilos.ESPACO_LG)
         acoes.pack(side="top", fill="x")
         # Guardado porque a faixa de conclusão é empacotada com `before=`
         # ele -- assim ela aparece e some sem reordenar o resto do cartão.
@@ -472,7 +480,7 @@ class App(tb.Window):
         ).pack(side="top", anchor="w", pady=(10, 0))
 
         # Resultado do que já foi processado nesta sessão.
-        self.moldura_resultado = ttk.Labelframe(cartao, text="Último processamento", padding=16)
+        self.moldura_resultado = ttk.Labelframe(cartao, text="Último processamento", padding=estilos.ESPACO_LG)
 
         self.lbl_resultado_vazio = ttk.Label(
             self.moldura_resultado, text=mensagens.VAZIO_SEM_PROCESSAMENTO, bootstyle="secondary",
@@ -489,7 +497,7 @@ class App(tb.Window):
         ]):
             bloco = ttk.Frame(self.frame_numeros)
             bloco.grid(row=0, column=coluna, sticky="w", padx=(0, 34))
-            valor = ttk.Label(bloco, text="0", font=("", 24, "bold"), bootstyle=estilo)
+            valor = ttk.Label(bloco, text="0", font=estilos.FONTE_DESTAQUE_NUMERO, bootstyle=estilo)
             valor.pack(anchor="w")
             ttk.Label(bloco, text=rotulo, bootstyle="secondary").pack(anchor="w")
             self._numeros_resultado[chave] = valor
@@ -538,10 +546,10 @@ class App(tb.Window):
         cartao = ttk.Frame(self._container_fluxo)
         self._cartao_selecao = cartao
 
-        moldura = ttk.Labelframe(cartao, text="Confira antes de processar", padding=16)
+        moldura = ttk.Labelframe(cartao, text="Confira antes de processar", padding=estilos.ESPACO_LG)
         moldura.pack(side="top", fill="x")
 
-        self.lbl_selecao_titulo = ttk.Label(moldura, text="", font=("", 15, "bold"))
+        self.lbl_selecao_titulo = ttk.Label(moldura, text="", font=estilos.FONTE_TITULO_CARTAO)
         self.lbl_selecao_titulo.pack(anchor="w")
         self.lbl_selecao_detalhe = ttk.Label(
             moldura, text="", bootstyle="secondary", wraplength=780, justify="left",
@@ -583,10 +591,10 @@ class App(tb.Window):
         cartao = ttk.Frame(self._container_fluxo)
         self._cartao_processando = cartao
 
-        moldura = ttk.Labelframe(cartao, text="Processando", padding=16)
+        moldura = ttk.Labelframe(cartao, text="Processando", padding=estilos.ESPACO_LG)
         moldura.pack(side="top", fill="x")
 
-        self.lbl_proc_titulo = ttk.Label(moldura, text="", font=("", 15, "bold"))
+        self.lbl_proc_titulo = ttk.Label(moldura, text="", font=estilos.FONTE_TITULO_CARTAO)
         self.lbl_proc_titulo.pack(anchor="w")
 
         self.barra_proc_inicio = ttk.Progressbar(
@@ -760,7 +768,7 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_aba_registros(self):
-        aba = ttk.Frame(self.abas, padding=10)
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
         self.abas.add(aba, text="Registros")
         self._aba_registros = aba
 
@@ -804,10 +812,15 @@ class App(tb.Window):
             )
         # Cor por status: o olho encontra a linha problemática antes de ler
         # qualquer texto. Tons claros de propósito -- o texto continua preto
-        # e legível, sem depender só da cor (o rótulo de status também diz).
-        self.tabela.tag_configure("confirmado", background="#eaf6ec")
-        self.tabela.tag_configure("revisao", background="#fdf4e3")
-        self.tabela.tag_configure("erro", background="#fbe9e7")
+        # e legível, sem depender só da cor (o rótulo de status também diz,
+        # em texto -- ver `_rotulo_status`/`ui/estilos.py`). As três cores
+        # vêm do mesmo vocabulário que decide o texto, para nunca haver uma
+        # linha "revisão" com a cor de "erro" por engano.
+        for status in ("CONFIRMADO", "REVISAO", "ERRO"):
+            self.tabela.tag_configure(
+                estilos.tag_status(status),
+                background=estilos.cor_fundo_tabela_status(status),
+            )
 
         vsb = ttk.Scrollbar(moldura, orient="vertical", command=self.tabela.yview)
         hsb = ttk.Scrollbar(moldura, orient="horizontal", command=self.tabela.xview)
@@ -837,7 +850,7 @@ class App(tb.Window):
         Nada disto substitui `_revisao_confirmar` (Fase 7/12): esta função
         só monta widgets, nenhum deles decide nada.
         """
-        aba = ttk.Frame(self.abas, padding=10)
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
         self.abas.add(aba, text="Revisão")
         self._aba_revisao = aba
 
@@ -892,7 +905,9 @@ class App(tb.Window):
         self.tabela_revisao_lista.bind("<<TreeviewSelect>>", self._on_selecionar_pendencia_lista)
 
         # ---- área 2: a foto da folha ------------------------------------
-        moldura_foto = ttk.Labelframe(painel, text="Folha digitalizada", padding=8)
+        # Padding menor de propósito (ESPACO_SM, não ESPACO_MD como as
+        # demais seções): é a foto que precisa do espaço, não a moldura.
+        moldura_foto = ttk.Labelframe(painel, text="Folha digitalizada", padding=estilos.ESPACO_SM)
         painel.add(moldura_foto, weight=4)
 
         controles_foto = ttk.Frame(moldura_foto)
@@ -924,7 +939,7 @@ class App(tb.Window):
 
         topo = ttk.Frame(moldura_form)
         topo.pack(side="top", fill="x")
-        self.lbl_revisao_posicao = ttk.Label(topo, text="", font=("", 11, "bold"))
+        self.lbl_revisao_posicao = ttk.Label(topo, text="", font=estilos.FONTE_ROTULO_FORTE)
         self.lbl_revisao_posicao.pack(side="left")
 
         # Resumo do bloqueio: SEMPRE visível, uma frase curta ("A dúvida
@@ -932,7 +947,7 @@ class App(tb.Window):
         # para saber o que está em jogo nesta linha.
         self.lbl_revisao_resumo = ttk.Label(
             moldura_form, text="", bootstyle="warning", wraplength=430,
-            justify="left", font=("", 10, "bold"),
+            justify="left", font=estilos.FONTE_ROTULO_MEDIO,
         )
         self.lbl_revisao_resumo.pack(side="top", fill="x", pady=(8, 2))
 
@@ -949,7 +964,7 @@ class App(tb.Window):
         self.btn_revisao_detalhes.pack(side="top", anchor="w", pady=(0, 4))
 
         self.moldura_revisao_explicacao = ttk.Labelframe(
-            moldura_form, text="Por que está em revisão", padding=10,
+            moldura_form, text="Por que está em revisão", padding=estilos.ESPACO_MD,
         )
         self.lbl_revisao_explicacao = ttk.Label(
             self.moldura_revisao_explicacao, text="", wraplength=420, justify="left",
@@ -961,7 +976,7 @@ class App(tb.Window):
         # é literalmente "a sugestão que o sistema já produziu, perto do
         # campo bloqueante", que é o pedido da 21b.
 
-        campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=12)
+        campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=estilos.ESPACO_MD)
         campos.pack(side="top", fill="x")
         self.moldura_revisao_campos = campos
 
@@ -1017,7 +1032,7 @@ class App(tb.Window):
             bootstyle="secondary", justify="left",
         ).grid(row=2 * len(linhas), column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        derivados = ttk.Labelframe(moldura_form, text="Obtido da base pela matrícula", padding=12)
+        derivados = ttk.Labelframe(moldura_form, text="Obtido da base pela matrícula", padding=estilos.ESPACO_MD)
         derivados.pack(side="top", fill="x", pady=(10, 0))
         self.lbl_revisao_nome = ttk.Label(derivados, text="—", wraplength=430, justify="left")
         self.lbl_revisao_nome.pack(side="top", anchor="w")
@@ -1052,7 +1067,7 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_aba_avisos(self):
-        aba = ttk.Frame(self.abas, padding=10)
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
         self.abas.add(aba, text="Avisos")
         self._aba_avisos = aba
 
@@ -1822,16 +1837,17 @@ class App(tb.Window):
     def _rotulo_status(status: str, observacao: str = "") -> str:
         """Rótulo curto da coluna Status. A razão (observação) tem coluna
         própria desde a Fase 10 -- juntar as duas espremia o texto que o
-        operador precisa ler."""
-        if status == "CONFIRMADO":
-            return "✓ CONFIRMADO"
-        if status == "ERRO":
-            return "✗ ERRO"
-        return "⚠ REVISÃO"
+        operador precisa ler.
+
+        Sub-fase 21c: o texto/ícone vêm de `ui/estilos.STATUS_VOCABULARIO`
+        -- vocabulário único ("✓ Confirmado" / "⚠ Precisa de revisão" /
+        "✕ Erro no processamento"), para nunca reimplementar o mesmo
+        status com palavras diferentes em telas diferentes."""
+        return estilos.texto_status(status)
 
     @staticmethod
     def _tag_status(status: str) -> str:
-        return {"CONFIRMADO": "confirmado", "ERRO": "erro"}.get(status, "revisao")
+        return estilos.tag_status(status)
 
     def _registro_passa_no_filtro(self, registro) -> bool:
         filtro = self.filtro_var.get() if hasattr(self, "filtro_var") else "Todos"

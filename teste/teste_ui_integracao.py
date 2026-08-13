@@ -190,7 +190,10 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
 
     linhas_apos_correcao = app.tabela.get_children()
     status_corrigido = [app.tabela.item(i)["values"][1] for i in linhas_apos_correcao]  # status agora é o índice 1
-    assert any("CONFIRMADO" in s for s in status_corrigido)
+    # Sub-fase 21c: o texto exibido vem do vocabulário único de
+    # `ui/estilos.py` ("✓ Confirmado"), não mais de uma string solta.
+    from leitor_matriculas.ui import estilos as _estilos
+    assert any(s == _estilos.texto_status("CONFIRMADO") for s in status_corrigido)
     print("OK: tabela principal refletiu a correcao (sincronizacao)")
 
     corrigidos = [r for r in app._registros_exportacao if r.get("nome") == "Fulano Corrigido"]
@@ -471,4 +474,82 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
 
 shutil.rmtree(_tmp_dir_img, ignore_errors=True)
 shutil.rmtree(_tmp_dir_correcoes, ignore_errors=True)
+
+# ==========================================================================
+# Sub-fase 21c -- responsividade: a aplicação continua funcional (sem
+# exceção, sem widget com dimensão zero/negativa, sem aba sumida) em pelo
+# menos duas resoluções de janela diferentes. Não mede pixel a pixel (fora
+# do que dá para verificar sem abrir o olho humano) -- mede o que uma
+# tela quebrada de verdade apresentaria: widget colapsado a 0/1px, ou uma
+# exceção ao redimensionar.
+# ==========================================================================
+with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
+     patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
+     patch("leitor_matriculas.ui.app.messagebox.showinfo"):
+    app_resp = App()
+    # Duas linhas sintéticas (uma de cada status principal) para a tabela
+    # não estar vazia durante o teste -- não precisa de OCR nem de thread.
+    app_resp._registros_exportacao = [
+        {"pagina_origem": 1, "status": "CONFIRMADO", "data": "23/04/26", "hora": "11:05",
+         "matricula": "12345", "nome": "Fulano de Tal", "setor": "TI", "motivo": "RH",
+         "gestor": "Gestor X", "cargo": "Analista", "confianca_matricula": 0.95,
+         "confianca_gestor": 0.9, "confianca_motivo": 0.9, "observacao": ""},
+        {"pagina_origem": 1, "status": "REVISAO", "data": "23/04/26", "hora": "",
+         "matricula": "", "nome": "", "setor": "", "motivo": "RH", "gestor": "Gestor X",
+         "cargo": "", "confianca_matricula": None, "confianca_gestor": 0.9,
+         "confianca_motivo": 0.9, "observacao": "matrícula não identificada pelo OCR"},
+    ]
+    app_resp._sincronizar_tabela_principal()
+    app_resp._atualizar_painel_revisao()  # popula a lista de pendências/foto da aba Revisão
+
+    def _checar_janela_utilizavel(rotulo, widgets_da_aba_ativa):
+        app_resp.update_idletasks()
+        app_resp.update()
+        # As abas continuam todas presentes -- redimensionar não pode
+        # fazer nenhuma sumir.
+        abas_presentes = app_resp.abas.tabs()
+        assert len(abas_presentes) == 4, f"{rotulo}: esperava 4 abas, achou {len(abas_presentes)}"
+        # Os widgets da aba ATUALMENTE VISÍVEL continuam com dimensão
+        # utilizável (nada colapsado a 0/1px, o que indicaria overlap ou
+        # um weight de grid quebrado). Widgets de uma aba oculta ficam
+        # com geometria não gerenciada por design do Notebook -- não é
+        # o que este teste mede.
+        for nome_widget, widget in [("notebook", app_resp.abas), ("cabecalho", app_resp.btn_salvar)] \
+                + widgets_da_aba_ativa:
+            largura = widget.winfo_width()
+            altura = widget.winfo_height()
+            assert largura > 10 and altura > 5, (
+                f"{rotulo}: {nome_widget} com dimensao suspeita ({largura}x{altura})"
+            )
+        print(f"OK: Sub-fase 21c -- janela utilizável em {rotulo} "
+              f"({app_resp.winfo_width()}x{app_resp.winfo_height()})")
+
+    app_resp.abas.select(app_resp._aba_registros)
+    widgets_registros = [("tabela", app_resp.tabela)]
+
+    # Tamanho padrão (o que a janela abre).
+    _checar_janela_utilizavel("1400x860 (padrão)", widgets_registros)
+
+    # Tamanho mínimo declarado (`self.minsize`, Fase 10) -- é o menor
+    # tamanho que o próprio programa afirma suportar.
+    app_resp.geometry("1120x700")
+    _checar_janela_utilizavel("1120x700 (mínimo declarado)", widgets_registros)
+
+    # Uma janela maior, para o caminho inverso (esticar, não só encolher).
+    app_resp.geometry("1800x1000")
+    _checar_janela_utilizavel("1800x1000 (janela grande)", widgets_registros)
+
+    # A aba Revisão (a mais densa -- 3 painéis) também precisa sobreviver
+    # ao redimensionamento, não só a Registros.
+    app_resp.abas.select(app_resp._aba_revisao)
+    app_resp.geometry("1120x700")
+    widgets_revisao = [
+        ("lista de pendências", app_resp.tabela_revisao_lista),
+        ("canvas da foto", app_resp.canvas_foto),
+        ("campo matrícula", app_resp.revisao_widgets["matricula"]),
+    ]
+    _checar_janela_utilizavel("1120x700, aba Revisão", widgets_revisao)
+
+    app_resp.destroy()
+
 print("TESTE DE INTEGRACAO UI COMPLETO: OK")
