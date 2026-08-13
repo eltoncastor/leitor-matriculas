@@ -43,7 +43,7 @@ def _checar_ui_recuperada(app, m_err):
     assert str(app.btn_imagem.cget('state')) == 'normal', "botao 'Selecionar imagem' deveria voltar a ficar habilitado"
     assert str(app.btn_pdf.cget('state')) == 'normal', "botao 'Selecionar PDF' deveria voltar a ficar habilitado"
     assert str(app.btn_limpar.cget('state')) == 'normal', "botao 'Limpar resultados' deveria voltar a ficar habilitado"
-    assert m_err.called, "messagebox.showerror deveria ter sido chamado para informar o erro"
+    assert m_err.called, "Messagebox.show_error deveria ter sido chamado para informar o erro"
     assert "Erro" in app.lbl_status.cget('text')
 
 
@@ -53,13 +53,15 @@ def _checar_ui_recuperada(app, m_err):
 # que _processar_uma_pagina nao blinda internamente).
 # ---------------------------------------------------------------------
 print("=== Caso 1: excecao generica escapando de _processar_uma_pagina ===")
-with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('leitor_matriculas.ui.app.Messagebox.show_warning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     with patch.object(App, '_processar_uma_pagina', side_effect=RuntimeError("falha simulada de inicializacao do OCR")):
         _rodar_worker_imagem(app, imagem)
     _checar_ui_recuperada(app, m_err)
-    titulo, mensagem = m_err.call_args[0]
+    # Sub-fase 22d: `Messagebox.show_error(mensagem, titulo, ...)` -- ordem
+    # invertida em relação ao antigo `messagebox.showerror(titulo, mensagem)`.
+    mensagem, titulo = m_err.call_args[0]
     assert "falha simulada de inicializacao do OCR" in mensagem
     print("OK: excecao generica nao trava a UI; botoes e status restaurados, erro informado")
     app.destroy()
@@ -71,7 +73,7 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
 # precisa capturar o resto.
 # ---------------------------------------------------------------------
 print("=== Caso 2: get_ocr_engine falha com excecao != ImportError ===")
-with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('leitor_matriculas.ui.app.Messagebox.show_warning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     app._ocr_engine = None  # força _processar_uma_pagina a tentar recriar o engine
@@ -87,7 +89,7 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
 # correcao nao alterou o caminho feliz.
 # ---------------------------------------------------------------------
 print("=== Caso 3: fluxo normal (sem falha) continua igual ===")
-with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showwarning'):
+with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('leitor_matriculas.ui.app.Messagebox.show_warning'):
     app = App()
     imagem = _ler_imagem(_caminho_img)
     fake_engine = MagicMock()

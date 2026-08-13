@@ -98,9 +98,9 @@ try:
             cv2.imwrite(caminho, np.full((120, 900, 3), 255, dtype=np.uint8))
         caminhos.append(caminho)
 
-    with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
-         patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
-         patch("leitor_matriculas.ui.app.messagebox.showinfo"):
+    with patch("leitor_matriculas.ui.app.Messagebox.show_error"), \
+         patch("leitor_matriculas.ui.app.Messagebox.show_warning"), \
+         patch("leitor_matriculas.ui.app.Messagebox.show_info"):
         app = App()
         fake_engine = MagicMock()
         fake_engine.recognize.return_value = _pagina_ocr_com_8_registros()

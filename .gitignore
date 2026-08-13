@@ -152,3 +152,8 @@ dados/*.xlsx
 # ser versionado. Nada no programa le este arquivo: apaga-lo devolve o
 # sistema exatamente ao estado anterior a Fase 20.
 dados/correcoes_humanas.jsonl
+
+# Preferencia de tema (Sub-fase 22e): estado local de UI, nao dado de
+# negocio -- fica fora de dados/ de proposito (ver ui/preferencias.py).
+# Nao versionado pelo mesmo motivo que qualquer outro estado por maquina.
+preferencias_ui.json

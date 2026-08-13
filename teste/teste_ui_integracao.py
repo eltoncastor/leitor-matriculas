@@ -15,9 +15,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np, cv2
 from unittest.mock import patch, MagicMock
 import pymupdf as fitz
+from tkinter import ttk
+import ttkbootstrap as tb
 
 from leitor_matriculas.ui.app import App, _ler_imagem
 from leitor_matriculas.ocr.engine import OCRResult
+from leitor_matriculas.ui import estilos
 
 
 class _DMRevisaoDeterministica:
@@ -81,8 +84,8 @@ resultados_ocr = cabecalho() + linha(40,60,"23.04.2026","11:05","Fulano","28972"
 _tmp_dir_correcoes = tempfile.mkdtemp(prefix="teste_ui_correcoes_")
 _arquivo_correcoes = os.path.join(_tmp_dir_correcoes, "correcoes_humanas.jsonl")
 
-with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('leitor_matriculas.ui.app.messagebox.showinfo') as m_info, \
-     patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn, \
+with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('leitor_matriculas.ui.app.Messagebox.show_info') as m_info, \
+     patch('leitor_matriculas.ui.app.Messagebox.show_warning') as m_warn, \
      patch('leitor_matriculas.dados.registro_correcoes.caminho_padrao',
            return_value=_arquivo_correcoes):
     app = App()
@@ -483,9 +486,9 @@ shutil.rmtree(_tmp_dir_correcoes, ignore_errors=True)
 # tela quebrada de verdade apresentaria: widget colapsado a 0/1px, ou uma
 # exceção ao redimensionar.
 # ==========================================================================
-with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
-     patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
-     patch("leitor_matriculas.ui.app.messagebox.showinfo"):
+with patch("leitor_matriculas.ui.app.Messagebox.show_error"), \
+     patch("leitor_matriculas.ui.app.Messagebox.show_warning"), \
+     patch("leitor_matriculas.ui.app.Messagebox.show_info"):
     app_resp = App()
     # Duas linhas sintéticas (uma de cada status principal) para a tabela
     # não estar vazia durante o teste -- não precisa de OCR nem de thread.
@@ -567,9 +570,9 @@ def _evidencia_bloqueante(campo):
             "valor_relacionado": None, "origem": "teste"}
 
 
-with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
-     patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
-     patch("leitor_matriculas.ui.app.messagebox.showinfo"):
+with patch("leitor_matriculas.ui.app.Messagebox.show_error"), \
+     patch("leitor_matriculas.ui.app.Messagebox.show_warning"), \
+     patch("leitor_matriculas.ui.app.Messagebox.show_info"):
     app_21d = App()
     registros_21d = [
         {"pagina_origem": 1, "status": "REVISAO", "data": "", "hora": "11:00",
@@ -685,6 +688,233 @@ with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
     assert not any("config" in n.lower() for n in nomes_abas), \
         f"uma aba de Configurações foi criada sem opcao real por tras: {nomes_abas}"
     print("OK: Sub-fase 21d -- nenhuma aba de Configurações decorativa foi criada")
+
+    # -------- Sub-fase 22b (Fase 22 -- redesign visual): navegação e Home --
+    # A correção do preâmbulo da 22b proíbe "Histórico" e "Configurações"
+    # como item de navegação (nenhum dos dois é uma tela real -- ver 21a);
+    # e a decisão desta sub-fase foi MANTER o Notebook (não trocar por
+    # sidebar) -- continua valendo a mesma trava de 4 abas da 21d, agora
+    # também nomeando "histó" (Histórico), não só "config".
+    nomes_abas_22b = [app_21d.abas.tab(aba, "text") for aba in app_21d.abas.tabs()]
+    assert len(nomes_abas_22b) == 4, f"a decisão da 22b foi manter as 4 abas reais, achou {nomes_abas_22b}"
+    assert not any("histó" in n.lower() for n in nomes_abas_22b), \
+        f"'Histórico' não é uma tela real (write-only por trava de teste) -- não pode virar item de navegação: {nomes_abas_22b}"
+    assert not any("config" in n.lower() for n in nomes_abas_22b), \
+        f"'Configurações' não tem nenhuma opção real por trás -- não pode virar item de navegação: {nomes_abas_22b}"
+
+    # A correção central desta sub-fase (auditoria 22a, achados 1/2): os
+    # agrupamentos da aba Início eram `ttk.Labelframe` (borda cavalgando o
+    # rótulo); viraram título + `Card.TFrame` sobre um `Canvas.TFrame`.
+    # Trava estrutural, não só visual: nenhum `ttk.Labelframe` sobra nos
+    # três cartões do fluxo.
+    def _sem_labelframe(widget):
+        for filho in widget.winfo_children():
+            assert not isinstance(filho, (ttk.LabelFrame,)), (
+                f"{filho} continua sendo um ttk.Labelframe -- a 22b substituiu "
+                "essa técnica por título + Card.TFrame"
+            )
+            _sem_labelframe(filho)
+
+    for cartao in (app_21d._cartao_pronto, app_21d._cartao_selecao, app_21d._cartao_processando):
+        _sem_labelframe(cartao)
+    assert app_21d._aba_inicio.cget("style") == "Canvas.TFrame"
+    assert app_21d._cartao_pronto.cget("style") == "Canvas.TFrame"
+    assert app_21d._cartao_selecao.cget("style") == "Canvas.TFrame"
+    assert app_21d._cartao_processando.cget("style") == "Canvas.TFrame"
+    # Registros/Revisão/Avisos ficaram FORA do escopo desta sub-fase --
+    # nenhuma das duas cores novas foi aplicada a elas ainda (Revisão
+    # entrou na 22c, Registros/Avisos entraram na 22d -- ver blocos
+    # abaixo; aqui só se confirma que a Início não vazou nada sozinha).
+    print("OK: Sub-fase 22b -- Início sem nenhum ttk.Labelframe residual (título + Card no lugar); "
+          "navegação continua com as 4 abas reais")
+
+    # Os estilos novos (paleta da 22a aplicada nesta sub-fase) precisam ter
+    # sido registrados de verdade -- um nome de estilo com erro de digitação
+    # não derruba o programa (ttk cai no padrão em silêncio), então só
+    # visualizar a tela não pegaria isso.
+    _estilo_22b = tb.Style()
+    assert _estilo_22b.lookup("Canvas.TFrame", "background") == estilos.COR_FUNDO
+    assert _estilo_22b.lookup("Card.TFrame", "background") == estilos.COR_SUPERFICIE
+    assert _estilo_22b.lookup("SecaoTitulo.TLabel", "background") == estilos.COR_FUNDO
+    print("OK: Sub-fase 22b -- estilos Canvas/Card/SecaoTitulo registrados com os tokens de ui/estilos.py")
+
+    # -------- Sub-fase 22c (Fase 22 -- redesign visual): aba Revisão -------
+    # Mesma trava estrutural da 22b, agora nas três áreas da Revisão: nenhum
+    # `ttk.Labelframe` residual (a correção central desta sub-fase).
+    def _sem_labelframe_22c(widget):
+        for filho in widget.winfo_children():
+            assert not isinstance(filho, ttk.LabelFrame), (
+                f"{filho} continua sendo um ttk.Labelframe na aba Revisão -- "
+                "a 22c substituiu essa técnica por título + Card.TFrame"
+            )
+            _sem_labelframe_22c(filho)
+
+    _sem_labelframe_22c(app_21d._aba_revisao)
+    print("OK: Sub-fase 22c -- aba Revisão sem nenhum ttk.Labelframe residual "
+          "(título + Card no lugar, nas 3 áreas)")
+
+    # O destaque do campo bloqueante continua funcionando (mesma checagem da
+    # 21b, re-executada aqui para travar que o refinamento visual da 22c --
+    # ícone + negrito no rótulo -- NÃO tirou o bootstyle "danger" da CAIXA,
+    # que é o sinal que um script/teste externo consegue verificar).
+    explicacao_22c, _sinais_22c = app_21d._explicacao_revisao_atual()
+    for chave, widget in app_21d.revisao_widgets.items():
+        estilo_widget = str(widget.cget("style"))
+        bloqueado = chave in explicacao_22c.campos_bloqueantes
+        assert ("danger" in estilo_widget) == bloqueado, (
+            f"campo {chave!r} (bloqueado={bloqueado}) com destaque inconsistente: {estilo_widget!r}"
+        )
+        # O RÓTULO ganha o ícone de alerta só quando bloqueado -- nunca
+        # perde o texto original (troca de estilo não pode apagar dado).
+        texto_rotulo = app_21d.revisao_rotulos[chave].cget("text")
+        texto_base = app_21d._revisao_rotulos_texto[chave]
+        if bloqueado:
+            assert estilos.ICONE_REVISAO in texto_rotulo and texto_base in texto_rotulo
+        else:
+            assert texto_rotulo == texto_base
+    print("OK: Sub-fase 22c -- campo bloqueante continua com a caixa em destaque "
+          "(bootstyle danger) e o rótulo ganha ícone sem perder o texto original")
+
+    # Nenhuma sugestão de contexto pré-seleciona um campo -- mesma garantia
+    # da Fase 18/21b (não tocada nesta sub-fase), reafirmada aqui porque é
+    # exatamente o que o preâmbulo da 22c pede para confirmar explicitamente.
+    _, registro_22c = app_21d._revisao_registro_atual()
+    for chave, var in app_21d.revisao_vars.items():
+        assert var.get() == (registro_22c.get(chave) or ""), (
+            f"campo {chave!r} veio diferente do valor já apurado do registro -- "
+            "uma sugestão não pode pré-preencher o formulário"
+        )
+    print("OK: Sub-fase 22c -- nenhuma sugestão de contexto vem pré-selecionada no formulário")
+
+    # Hover: puramente cosmético, não pode alterar seleção real nem status.
+    selecao_antes_hover = app_21d.tabela_revisao_lista.selection()
+    status_antes_hover = [r["status"] for r in app_21d._registros_exportacao]
+
+    class _EventoFalso:
+        y = 5
+
+    app_21d._on_hover_lista_revisao(_EventoFalso())
+    assert app_21d.tabela_revisao_lista.selection() == selecao_antes_hover
+    app_21d._limpar_hover_lista_revisao()
+    assert app_21d._hover_item_revisao is None
+    assert [r["status"] for r in app_21d._registros_exportacao] == status_antes_hover
+    print("OK: Sub-fase 22c -- hover da lista de pendências é cosmético "
+          "(não altera seleção nem status de registro nenhum)")
+
+    # Os containers das três áreas usam Canvas.TFrame -- mesmo padrão de
+    # verificação da 22b, agora para a Revisão.
+    _estilo_22c = tb.Style()
+    assert _estilo_22c.lookup("PosicaoRevisao.TLabel", "background") == estilos.COR_FUNDO
+    assert _estilo_22c.lookup("ResumoRevisao.TLabel", "foreground") == estilos.COR_ATENCAO
+    assert _estilo_22c.lookup("ResultadoRevisaoErro.TLabel", "foreground") == estilos.COR_ERRO
+    print("OK: Sub-fase 22c -- estilos PosicaoRevisao/ResumoRevisao/ResultadoRevisaoErro "
+          "registrados com os tokens de ui/estilos.py")
+
+    # A proteção central continua intacta: `_revisao_confirmar` é o único
+    # caminho para sair de REVISAO -- mesma trava por regex da 21b,
+    # reconferida aqui porque esta sub-fase tocou bastante `ui/app.py`.
+    assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', codigo_app), \
+        "22c: nenhum lugar pode gravar CONFIRMADO na marra"
+    print("OK: Sub-fase 22c -- _revisao_confirmar continua o UNICO caminho para sair de REVISAO")
+
+    # -------- Sub-fase 22d (Fase 22 -- redesign visual): tabelas e diálogos --
+    # Registros e Avisos entram no mesmo padrão canvas+cartão (mesma trava
+    # estrutural das sub-fases anteriores, agora sem a exceção da 22b).
+    def _sem_labelframe_22d(widget):
+        for filho in widget.winfo_children():
+            assert not isinstance(filho, ttk.LabelFrame), (
+                f"{filho} continua sendo um ttk.Labelframe -- Registros/Avisos "
+                "entraram no padrão título+Card.TFrame na 22d"
+            )
+            _sem_labelframe_22d(filho)
+
+    _sem_labelframe_22d(app_21d._aba_registros)
+    _sem_labelframe_22d(app_21d._aba_avisos)
+    assert app_21d._aba_registros.cget("style") == "Canvas.TFrame"
+    assert app_21d._aba_avisos.cget("style") == "Canvas.TFrame"
+    assert app_21d._moldura_tabela.cget("style") == "Card.TFrame"
+    print("OK: Sub-fase 22d -- Registros/Avisos sem nenhum ttk.Labelframe residual "
+          "(mesmo padrão canvas+Card das demais abas)")
+
+    # Estilos da tabela: fundo de cartão, cabeçalho discreto, seleção no
+    # mesmo tom da lista de pendências, e o contorno de FOCO neutralizado
+    # (o achado real desta sub-fase: o construtor de Treeview do
+    # ttkbootstrap pinta um contorno azul de accent ao redor da tabela
+    # inteira quando ela tem foco -- ver comentário em
+    # `_montar_estilos_visuais`).
+    _estilo_22d = tb.Style()
+    assert _estilo_22d.lookup("Treeview", "background") == estilos.COR_SUPERFICIE
+    assert _estilo_22d.lookup("Treeview.Heading", "foreground") == estilos.COR_TEXTO_SECUNDARIO
+    assert _estilo_22d.lookup("Treeview", "bordercolor", state=["focus"]) == estilos.COR_BORDA
+    print("OK: Sub-fase 22d -- estilos de Treeview (fundo/cabeçalho/contorno de foco) "
+          "registrados com os tokens de ui/estilos.py")
+
+    # Hover genérico (Avisos): mesma garantia da 22c -- cosmético, não
+    # altera o conteúdo da tabela nem nenhum estado de negócio.
+    app_21d._atualizar_avisos()
+    itens_avisos = app_21d.tabela_avisos.get_children()
+    assert itens_avisos, "esperava ao menos uma linha (avisos reais ou o placeholder de vazio)"
+
+    class _EventoFalsoAvisos:
+        y = 5
+
+    handler_hover = app_21d._on_hover_generico(app_21d.tabela_avisos)
+    handler_limpar = app_21d._limpar_hover_generico(app_21d.tabela_avisos)
+    handler_hover(_EventoFalsoAvisos())
+    assert "hover" in app_21d.tabela_avisos.item(itens_avisos[0], "tags")
+    handler_limpar()
+    assert "hover" not in app_21d.tabela_avisos.item(itens_avisos[0], "tags")
+    assert getattr(app_21d.tabela_avisos, "_hover_item", None) is None
+    print("OK: Sub-fase 22d -- hover genérico da aba Avisos é cosmético "
+          "(tag aparece/some sem alterar conteúdo da tabela)")
+
+    # Diálogos: `Messagebox` (ttkbootstrap) no lugar de `tkinter.
+    # messagebox` -- confirma que o import certo está em uso (o resto da
+    # suíte já prova que os `patch(...)` corretos interceptam as chamadas
+    # sem travar em um diálogo real).
+    from ttkbootstrap.dialogs import Messagebox as _MessageboxEsperado
+    assert app.__class__.__module__ == "leitor_matriculas.ui.app"
+    import leitor_matriculas.ui.app as _app_module
+    assert _app_module.Messagebox is _MessageboxEsperado
+    assert not hasattr(_app_module, "messagebox"), (
+        "o import antigo (tkinter.messagebox) deveria ter sido removido -- "
+        "nenhuma chamada mais usa ele"
+    )
+    print("OK: Sub-fase 22d -- diálogos usam Messagebox (ttkbootstrap), "
+          "import antigo (tkinter.messagebox) removido")
+
+    assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', codigo_app), \
+        "22d: nenhum lugar pode gravar CONFIRMADO na marra"
+    print("OK: Sub-fase 22d -- _revisao_confirmar continua o UNICO caminho para sair de REVISAO")
+
+    # -------- Sub-fase 22e (Fase 22 -- redesign visual): tema e modo escuro --
+    # SÓ verificação ESTRUTURAL aqui -- não chama `_alternar_tema()` de
+    # verdade nesta instância. `self.style.theme_use(...)` (ttkbootstrap)
+    # só funciona sem erro para a PRIMEIRA janela Tk do processo (medido
+    # -- ver `saida/avaliacao_fase22_redesign.md`, seção 22e); a esta
+    # altura do arquivo, `app_21d` já é uma entre DEZENAS de `App()`
+    # criadas no mesmo processo, e uma segunda chamada real a
+    # `theme_use` aqui reproduz o mesmo `TclError` cosmético já
+    # documentado do `TPanedwindow` (22c/22d) -- não um bug desta
+    # sub-fase. O ciclo completo de alternância É testado de verdade,
+    # com uma única `App()` isolada no próprio processo (exatamente como
+    # a operação real), em `teste/teste_alternar_tema.py`.
+    assert hasattr(app_21d, "btn_alternar_tema")
+    assert not app_21d._tema_escuro, "esta sessão de teste não trocou de tema -- deveria seguir clara"
+    assert estilos.ICONE_TEMA_ESCURO in app_21d.btn_alternar_tema.cget("text"), (
+        "no tema claro, o botão deveria oferecer trocar para o ESCURO"
+    )
+    assert estilos.TEMA_CLARO != estilos.TEMA_ESCURO
+    assert callable(app_21d._alternar_tema)
+    print("OK: Sub-fase 22e -- botão de alternância de tema existe e mostra o estado inicial correto "
+          "(ciclo completo de troca testado em teste_alternar_tema.py)")
+
+    # Reconfirmação final (fim da Fase 22): a proteção central continua
+    # intacta depois de cinco sub-fases mexendo bastante em ui/app.py.
+    assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', codigo_app), \
+        "fim da Fase 22: nenhum lugar pode gravar CONFIRMADO na marra"
+    print("OK: Sub-fase 22e -- _revisao_confirmar continua o UNICO caminho para sair de REVISAO "
+          "(reconfirmado ao fim da Fase 22)")
 
     app_21d.destroy()
 

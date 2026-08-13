@@ -25,7 +25,7 @@ def get_pixmap_falha_pagina2(self, *a, **kw):
         raise RuntimeError("falha simulada")
     return original_get_pixmap(self, *a, **kw)
 
-with patch('leitor_matriculas.ui.app.messagebox.showerror'), patch('leitor_matriculas.ui.app.messagebox.showwarning') as m_warn:
+with patch('leitor_matriculas.ui.app.Messagebox.show_error'), patch('leitor_matriculas.ui.app.Messagebox.show_warning') as m_warn:
     app = App()
     fake = MagicMock()
     fake.recognize.return_value = []

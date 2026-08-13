@@ -93,9 +93,9 @@ try:
             raise RuntimeError("falha simulada no meio do lote (item malformado)")
         return original_adicionar(self, numero_pagina, registros)
 
-    with patch("leitor_matriculas.ui.app.messagebox.showerror"), \
-         patch("leitor_matriculas.ui.app.messagebox.showwarning"), \
-         patch("leitor_matriculas.ui.app.messagebox.showinfo"), \
+    with patch("leitor_matriculas.ui.app.Messagebox.show_error"), \
+         patch("leitor_matriculas.ui.app.Messagebox.show_warning"), \
+         patch("leitor_matriculas.ui.app.Messagebox.show_info"), \
          patch.object(App, "_adicionar_registros", _adicionar_registros_com_falha), \
          patch.object(App, "_pasta_saida_padrao", staticmethod(lambda: tmp_saida)):
         app = App()

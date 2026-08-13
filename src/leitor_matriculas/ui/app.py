@@ -61,12 +61,13 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 import cv2
 import numpy as np
 import ttkbootstrap as tb
 from PIL import Image, ImageTk
+from ttkbootstrap.dialogs import Messagebox
 
 from leitor_matriculas.ocr.image_processor import preprocess_image
 from leitor_matriculas.ocr.engine import get_ocr_engine, normalizar_matricula
@@ -85,13 +86,20 @@ from leitor_matriculas.validacao.recuperacao_matricula import resolver_matricula
 from leitor_matriculas.ui import explicacao_revisao
 from leitor_matriculas.ui import mensagens
 from leitor_matriculas.ui import estilos
+from leitor_matriculas.ui import preferencias
 from leitor_matriculas.ocr import pdf_reader
 from leitor_matriculas.exportacao import xlsx_exporter
 
 EXTENSOES_IMAGEM = [("Imagens", "*.jpg *.jpeg *.png *.webp"), ("Todos", "*.*")]
 EXTENSOES_PDF = [("PDF", "*.pdf")]
 
-TEMA = "cosmo"
+# Sub-fase 22e: `cosmo` nunca tinha sido reavaliado -- ver a auditoria em
+# `saida/avaliacao_fase22_redesign.md` (seção 22e) e a explicação em
+# `ui/estilos.py` (por que `flatly`/`darkly` foram escolhidos como o par
+# claro/escuro). O nome do tema ATIVO nesta sessão (`self._tema_atual`,
+# em `App`) pode ser um dos dois -- esta constante é só o padrão de
+# abertura.
+TEMA = estilos.TEMA_CLARO
 
 # Placeholder explícito para Nome/Cargo/Setor quando a matrícula não pôde
 # ser associada a um colaborador da base — nunca deixamos a célula "vazia
@@ -148,15 +156,12 @@ FILTROS_TABELA = ("Todos", "Confirmados", "Em revisão", "Com erro")
 # exagerar em cores", pedido explícito do escopo) por campo, usada tanto na
 # lista de pendências quanto no rótulo do campo em destaque no formulário.
 # É só apresentação -- os nomes das chaves são os mesmos de
-# `explicacao_revisao.ROTULOS`.
-CORES_TIPO_PENDENCIA = {
-    "data": "#5c6bc0",
-    "hora": "#00897b",
-    "matricula": "#8e24aa",
-    "motivo": "#ef6c00",
-    "gestor": "#c2185b",
-}
-COR_TIPO_PENDENCIA_PADRAO = "#495057"
+# `explicacao_revisao.ROTULOS`. Sub-fase 22e: os valores moraram para
+# `ui/estilos.py` (`CORES_TIPO_PENDENCIA`/`COR_TIPO_PENDENCIA_PADRAO`),
+# que `aplicar_paleta()` atualiza IN-PLACE ao trocar de tema -- este
+# nome continua existindo aqui como ALIAS do MESMO dicionário (não uma
+# cópia), então nada que já lia `CORES_TIPO_PENDENCIA` precisou mudar.
+CORES_TIPO_PENDENCIA = estilos.CORES_TIPO_PENDENCIA
 
 # Sub-fase 21d: filtro por tipo de pendência na lista de Revisão. O rótulo
 # mostrado no Combobox é o mesmo de `explicacao_revisao.ROTULOS`
@@ -253,7 +258,20 @@ def _reparar_data_hora_mescladas(registros):
 
 class App(tb.Window):
     def __init__(self):
-        super().__init__(themename=TEMA)
+        # Sub-fase 22e: abre no tema salvo da última sessão (se houver
+        # -- `preferencias.py`, nunca lança, devolve claro por padrão).
+        # `self._tema_escuro` é o estado de VERDADE a partir daqui;
+        # `TEMA`/`estilos.TEMA_CLARO` só decidem o padrão de abertura.
+        self._tema_escuro = preferencias.carregar_tema_escuro()
+        tema_inicial = estilos.TEMA_ESCURO if self._tema_escuro else estilos.TEMA_CLARO
+        super().__init__(themename=tema_inicial)
+        # As cores fortes (`COR_ACCENT`/`COR_SUCESSO`/`COR_ATENCAO`/
+        # `COR_ERRO`) e a paleta de fundo/texto deste módulo já podem ser
+        # calculadas: o `Style()` do `ttkbootstrap` acabou de carregar o
+        # tema `tema_inicial` na linha acima. Precisa vir ANTES de
+        # `_montar_layout()`, que já lê `estilos.COR_*` para montar os
+        # widgets.
+        estilos.aplicar_paleta(self._tema_escuro, self.style.colors)
         self.title("Leitor de Planilhas by Elton Marques")
         self.geometry("1400x860")
         self.minsize(1120, 700)
@@ -319,6 +337,11 @@ class App(tb.Window):
         # expandido. Fecha por padrão a cada registro novo, para não dominar
         # a tela (pedido explícito do escopo da 21b).
         self._revisao_detalhes_expandido = False
+        # Sub-fase 22c: item da lista de pendências sob o cursor (hover
+        # visual, puramente cosmético -- não participa de nenhuma decisão
+        # nem da seleção real, que continua sendo `tabela_revisao_lista.
+        # selection()`). `None` quando o cursor não está sobre a lista.
+        self._hover_item_revisao = None
 
         self._montar_layout()
         # Sincroniza a tabela já vazia para que o estado vazio (Fase 21a)
@@ -333,13 +356,7 @@ class App(tb.Window):
     # LAYOUT
     # ==================================================================
     def _montar_layout(self):
-        # Linhas mais altas em TODAS as tabelas (ver ALTURA_LINHA_TABELA).
-        try:
-            estilo = tb.Style()
-            estilo.configure("Treeview", rowheight=ALTURA_LINHA_TABELA)
-        except Exception:
-            logging.exception("Falha ao ajustar a altura das linhas (apenas cosmético)")
-
+        self._montar_estilos_visuais()
         self._montar_cabecalho()
 
         self.abas = ttk.Notebook(self)
@@ -354,9 +371,301 @@ class App(tb.Window):
 
         self._montar_rodape()
 
+        # Sub-fase 22e: idempotente na montagem inicial (mesmos valores
+        # que cada `_montar_aba_*` já aplicou) -- existe aqui, num único
+        # lugar, para ser exatamente o que `_alternar_tema()` chama de
+        # novo depois de trocar de tema.
+        self._aplicar_cores_dinamicas_tabelas()
+        self._atualizar_texto_botao_tema()
+
+    # ------------------------------------------------------------------
+    def _montar_estilos_visuais(self):
+        """
+        Sub-fase 22b (Fase 22 -- redesign visual): registra os estilos
+        `ttk` derivados dos tokens de `ui/estilos.py` que a Home e o
+        cabeçalho passam a usar. Só isto -- nenhuma regra de negócio.
+
+        Sub-fase 22e: chamado DUAS vezes por sessão, no mínimo -- uma vez
+        na montagem inicial (`_montar_layout`) e de novo a cada
+        `_alternar_tema()`, depois que `estilos.aplicar_paleta(...)` já
+        atualizou os tokens `estilos.COR_*` para o modo novo. Como os
+        widgets referenciam os estilos por NOME (`style="Card.TFrame"`
+        etc.), reconfigurar o mesmo nome aqui é o que os redesenha --
+        nenhum widget individual precisa ser tocado.
+
+        A CORREÇÃO CENTRAL que estes estilos existem para viabilizar (ver
+        achados 1/2 da auditoria da 22a em `saida/avaliacao_fase22_
+        redesign.md`): o tema `cosmo` nunca separou fundo de TELA de
+        fundo de CARTÃO -- os dois eram a mesma cor branca, e por isso
+        cada agrupamento só se distinguia do resto por uma borda de
+        `ttk.LabelFrame`. `Canvas.TFrame`/`Canvas.TLabel` (cor de fundo
+        `estilos.COR_FUNDO`, o cinza-azulado claro) pintam o CONTEÚDO de
+        uma aba; `Card.TFrame` (branco, `estilos.COR_SUPERFICIE`) pinta
+        os agrupamentos que antes eram `ttk.Labelframe` -- a mesma cor
+        que o `TFrame` padrão do tema já usava, mas nomeada explicitamente
+        em vez de depender de uma coincidência entre o tema e o token
+        (se `COR_SUPERFICIE` mudar um dia, o estilo muda junto; contando
+        com o padrão do tema, não mudaria).
+
+        `SecaoTitulo.TLabel` substitui o texto que o `Labelframe` cavalgava
+        na própria borda (`text="O que você quer fazer?"`) por um título
+        comum ACIMA do cartão, na cor do canvas -- é a técnica que troca
+        borda por espaço/contraste, o critério escrito em `ui/estilos.py`.
+
+        Escopo da 22b: cabeçalho, rodapé, abas (Notebook) e a aba Início.
+        Sub-fase 22c ESTENDEU este mesmo método (não criou um segundo) com
+        os estilos que a aba Revisão passou a usar: `PosicaoRevisao.
+        TLabel`/`ResumoRevisao.TLabel`/`ResultadoRevisaoErro.TLabel` (as
+        três únicas cores que a Revisão trocava dinamicamente via
+        `bootstyle`, e que precisavam de um fundo próprio -- `bootstyle`
+        sozinho não define fundo, só a cor do texto, e o fundo branco
+        padrão do tema ficaria como uma mancha sobre o canvas cinza), o
+        realce da linha selecionada/em hover da lista de pendências
+        (`Treeview` com a tag "revisao_lista", `COR_SELECAO_LISTA`) e o
+        fundo do `TPanedwindow` (a área entre os três painéis).
+
+        Sub-fase 22d ESTENDEU de novo com o estilo `"Treeview"` PLANO
+        (cabeçalho, fundo, seleção) -- o que Registros e Avisos usam.
+        Também é aqui, não mais num bloco solto em `_montar_layout`, que
+        `rowheight=ALTURA_LINHA_TABELA` é aplicado (consolidado: era a
+        única configuração de estilo que ainda vivia fora deste método).
+        Como o estilo `"light.Treeview"` da lista de pendências (22c) é
+        um BUCKET SEPARADO (`ttkbootstrap` cria um por `bootstyle`), mexer
+        em `"Treeview"` aqui não vaza para a Revisão -- só os dois únicos
+        outros widgets que usam o estilo plano (`self.tabela`/`self.
+        tabela_avisos`) são afetados, de propósito.
+        """
+        try:
+            estilo = tb.Style()
+
+            # A janela raiz é um `tk.Tk` puro por baixo do `tb.Window`; o
+            # que sobra fora de qualquer `ttk.Frame` (as margens do
+            # `Notebook`, por exemplo) mostra esta cor.
+            self.configure(background=estilos.COR_FUNDO)
+
+            estilo.configure("Canvas.TFrame", background=estilos.COR_FUNDO)
+            estilo.configure(
+                "Canvas.TLabel", background=estilos.COR_FUNDO, foreground=estilos.COR_TEXTO_PRIMARIO,
+            )
+            estilo.configure(
+                "CanvasSecundario.TLabel", background=estilos.COR_FUNDO, foreground=estilos.COR_TEXTO_SECUNDARIO,
+            )
+            estilo.configure(
+                "SecaoTitulo.TLabel", background=estilos.COR_FUNDO,
+                foreground=estilos.COR_TEXTO_PRIMARIO, font=estilos.FONTE_TITULO_SECAO,
+            )
+            estilo.configure("Card.TFrame", background=estilos.COR_SUPERFICIE)
+            estilo.configure(
+                "HeaderTitulo.TLabel", background=estilos.COR_SUPERFICIE, foreground=estilos.COR_TEXTO_PRIMARIO,
+                font=estilos.FONTE_TITULO_CABECALHO,
+            )
+            # Sub-fase 22e: cabeçalho e rodapé usavam `ttk.Frame` SEM
+            # estilo -- em `cosmo`/`flatly` (fundo padrão branco) isso
+            # coincidia com `COR_SUPERFICIE` por acaso; a troca de tema
+            # revelou a armadilha real dessa coincidência: alternando
+            # para `darkly`, PARTE do cabeçalho ficava clara e parte
+            # escura (um problema de repintura de um `TFrame` sem nome
+            # próprio, não só de cor errada -- confirmado inspecionando
+            # pixels da captura, não só olhando por cima). `Header.
+            # TFrame`, com fundo nomeado explicitamente, garante que
+            # `_montar_estilos_visuais` (chamado de novo a cada troca)
+            # realmente repinta a área inteira.
+            estilo.configure("Header.TFrame", background=estilos.COR_SUPERFICIE)
+            estilo.configure(
+                "Header.TLabel", background=estilos.COR_SUPERFICIE, foreground=estilos.COR_TEXTO_PRIMARIO,
+            )
+            estilo.configure(
+                "HeaderSecundario.TLabel", background=estilos.COR_SUPERFICIE, foreground=estilos.COR_TEXTO_SECUNDARIO,
+            )
+            # Linha de 1px -- separa o cabeçalho/rodapé (brancos) do resto
+            # da janela (cinza), no lugar de uma borda ao redor de tudo.
+            estilo.configure("Separador.TFrame", background=estilos.COR_BORDA)
+
+            # Notebook (abas): aba ativa na cor de cartão, inativas na cor
+            # de canvas -- o mesmo contraste de fundo aplicado à navegação.
+            estilo.configure("TNotebook", background=estilos.COR_FUNDO, borderwidth=0)
+            estilo.configure("TNotebook.Tab", padding=(estilos.ESPACO_LG, estilos.ESPACO_SM), font=estilos.FONTE_ROTULO_MEDIO)
+            estilo.map(
+                "TNotebook.Tab",
+                background=[("selected", estilos.COR_SUPERFICIE), ("!selected", estilos.COR_FUNDO)],
+                foreground=[("selected", estilos.COR_TEXTO_PRIMARIO), ("!selected", estilos.COR_TEXTO_SECUNDARIO)],
+            )
+
+            # Sub-fase 22c (aba Revisão): três rótulos que trocavam de cor
+            # dinamicamente via `bootstyle` ("warning"/"danger") e ficaram
+            # diretamente sobre o canvas cinza -- `bootstyle` só define a
+            # cor do TEXTO, nunca o fundo, então sem um estilo próprio cada
+            # um apareceria como uma mancha branca (a cor de fundo padrão
+            # do tema) sobre o cinza. Cada um usa a cor FORTE correspondente
+            # da paleta da 22a (`COR_ATENCAO`/`COR_ERRO`), nunca inventada.
+            estilo.configure(
+                "PosicaoRevisao.TLabel", background=estilos.COR_FUNDO,
+                foreground=estilos.COR_TEXTO_PRIMARIO, font=estilos.FONTE_ROTULO_FORTE,
+            )
+            estilo.configure(
+                "ResumoRevisao.TLabel", background=estilos.COR_FUNDO,
+                foreground=estilos.COR_ATENCAO, font=estilos.FONTE_ROTULO_MEDIO,
+            )
+            estilo.configure(
+                "ResultadoRevisaoErro.TLabel", background=estilos.COR_FUNDO, foreground=estilos.COR_ERRO,
+            )
+
+            # (O ajuste da cor de seleção da lista de pendências --
+            # "light.Treeview" -- fica em `_montar_aba_revisao`, logo após
+            # criar o widget: o `ttkbootstrap` só REGISTRA o estilo
+            # "light.Treeview" na hora em que o primeiro widget com
+            # `bootstyle="light"` é construído; ajustar aqui, antes disso
+            # existir, seria sobrescrito pelo próprio `ttkbootstrap` quando
+            # ele constrói o estilo em seguida.)
+
+            # A faixa entre os três painéis (o "sash" arrastável) mostrando
+            # a mesma cor do canvas, em vez do cinza genérico do tema.
+            estilo.configure("TPanedwindow", background=estilos.COR_FUNDO)
+
+            # Sub-fase 22d: tabelas de Registros e Avisos -- estilo
+            # `"Treeview"` PLANO (ver nota no docstring sobre por que isto
+            # não afeta a lista de pendências, que usa outro estilo).
+            # Linha mais alta (Fase 10, só consolidada aqui), fundo/campo
+            # na cor de cartão (nomeado, em vez de coincidir com o padrão
+            # do tema), cabeçalho discreto (texto secundário, sem o baixo-
+            # relevo pesado do tema padrão) e a MESMA técnica de seleção
+            # da lista de pendências -- para as tabelas pararem de parecer
+            # widgets soltos de temas diferentes.
+            estilo.configure(
+                "Treeview", rowheight=ALTURA_LINHA_TABELA,
+                background=estilos.COR_SUPERFICIE, fieldbackground=estilos.COR_SUPERFICIE,
+            )
+            estilo.configure(
+                "Treeview.Heading", background=estilos.COR_SUPERFICIE, foreground=estilos.COR_TEXTO_SECUNDARIO,
+                font=estilos.FONTE_ROTULO_MEDIO, relief="flat",
+            )
+            # Sem "foreground" no mapa: as tags de status (CONFIRMADO/
+            # REVISAO/ERRO, `estilos.cor_fundo_tabela_status`) continuam
+            # decidindo o fundo das linhas NÃO selecionadas -- só a
+            # SELECIONADA usa o tom pastel de accent.
+            #
+            # `bordercolor`/`lightcolor`/`darkcolor` fixados (não deixados
+            # herdar do construtor de Treeview do `ttkbootstrap`, que mapeia
+            # esses três para a cor de accent quando o widget tem foco --
+            # um contorno azul grosso em volta da tabela inteira ao clicar
+            # nela, sem nenhuma relação com o resto do app). Fixá-los aqui
+            # sobrepõe esse mapa padrão sem alterar a MOLDURA em si.
+            estilo.map(
+                "Treeview",
+                background=[("selected", estilos.COR_SELECAO_LISTA)],
+                foreground=[("selected", estilos.COR_TEXTO_PRIMARIO)],
+                bordercolor=[("focus", estilos.COR_BORDA), ("!focus", estilos.COR_BORDA)],
+                lightcolor=[("focus", estilos.COR_SUPERFICIE), ("!focus", estilos.COR_SUPERFICIE)],
+                darkcolor=[("focus", estilos.COR_SUPERFICIE), ("!focus", estilos.COR_SUPERFICIE)],
+            )
+        except Exception:
+            logging.exception("Falha ao registrar os estilos visuais novos (apenas cosmético)")
+
+    # ------------------------------------------------------------------
+    def _separador_horizontal(self, mestre=None, lado="top"):
+        """Linha fina de 1px (`Separador.TFrame`) para trocar borda por
+        contraste discreto entre duas faixas de cor diferentes (ex.:
+        cabeçalho branco sobre o canvas cinza). `lado="bottom"` para o
+        rodapé, onde a linha precisa ficar presa à borda inferior da
+        janela, não ao topo do que sobrou da área de empacotamento."""
+        linha = ttk.Frame(mestre if mestre is not None else self, style="Separador.TFrame", height=1)
+        linha.pack(side=lado, fill="x")
+        return linha
+
+    # ------------------------------------------------------------------
+    def _aplicar_selecao_lista_revisao(self):
+        """
+        Sobrescreve a cor de fundo E de texto da linha SELECIONADA da
+        lista de pendências (Sub-fase 22c/22e). Extraído para método
+        próprio (era código embutido em `_montar_aba_revisao` até a
+        22e) porque a alternância de tema precisa REPETIR exatamente
+        isto depois de `self.style.theme_use(...)`: o `ttkbootstrap`
+        reconstrói o estilo `"light.Treeview"` para o tema novo (com o
+        cinza/branco padrão dele, não com `COR_SELECAO_LISTA`) sempre
+        que o tema muda -- esta sobreposição precisa ser refeita, não
+        só feita uma vez na montagem inicial.
+
+        Widget-alvo isolado do resto da aplicação: `"light.Treeview"` só
+        é usado por `self.tabela_revisao_lista` (ver o comentário em
+        `_montar_aba_revisao` sobre por que `bootstyle="light"`, não
+        `style=`, foi o jeito de conseguir um estilo próprio).
+        """
+        try:
+            tb.Style().map(
+                "light.Treeview",
+                background=[("selected", estilos.COR_SELECAO_LISTA)],
+                foreground=[("selected", estilos.COR_TEXTO_PRIMARIO)],
+            )
+        except Exception:
+            logging.exception("Falha ao ajustar a cor de seleção da lista de pendências (apenas cosmético)")
+
+    # ------------------------------------------------------------------
+    def _aplicar_cores_dinamicas_tabelas(self):
+        """
+        Sub-fase 22e: reaplica todas as cores que foram fixadas via
+        `tag_configure`/`.map()` em vez de um estilo `ttk` nomeado --
+        `self.style.theme_use(...)` NÃO atualiza essas sozinho (ele só
+        redesenha widgets que usam um estilo por NOME; uma tag de
+        Treeview é um valor literal preso no momento em que foi
+        configurada). Chamado uma vez ao fim de `_montar_layout` (idem-
+        potente -- mesmos valores que a montagem inicial já usou) e de
+        novo a cada `_alternar_tema()`.
+        """
+        for status in ("CONFIRMADO", "REVISAO", "ERRO"):
+            self.tabela.tag_configure(
+                estilos.tag_status(status),
+                background=estilos.cor_fundo_tabela_status(status),
+            )
+        for campo, cor in CORES_TIPO_PENDENCIA.items():
+            self.tabela_revisao_lista.tag_configure(campo, foreground=cor)
+        self.tabela_revisao_lista.tag_configure("outro", foreground=estilos.COR_TIPO_PENDENCIA_PADRAO)
+        self.tabela_revisao_lista.tag_configure("hover", background=estilos.COR_FUNDO)
+        self._aplicar_selecao_lista_revisao()
+        self.tabela_avisos.tag_configure("hover", background=estilos.COR_FUNDO)
+
+    # ------------------------------------------------------------------
+    def _alternar_tema(self):
+        """
+        Sub-fase 22e: alterna entre `estilos.TEMA_CLARO`/`TEMA_ESCURO`
+        em tempo de execução -- o único controle de preferência real do
+        programa (ver `ui/preferencias.py`). Só camada de apresentação:
+        não toca em `_registros_exportacao`, `_data_manager` nem em
+        nenhum estado de negócio.
+        """
+        self._tema_escuro = not self._tema_escuro
+        novo_tema = estilos.TEMA_ESCURO if self._tema_escuro else estilos.TEMA_CLARO
+        try:
+            self.style.theme_use(novo_tema)
+        except Exception:
+            logging.exception("Falha ao trocar de tema (interface pode continuar no tema anterior)")
+            self._tema_escuro = not self._tema_escuro  # desfaz a intenção -- a troca não aconteceu
+            return
+        # `self.style.theme_use` já trocou o tema; `self.style.colors`
+        # agora reflete o tema NOVO -- é esse `colors` que alimenta
+        # `COR_ACCENT`/`COR_SUCESSO`/`COR_ATENCAO`/`COR_ERRO`.
+        estilos.aplicar_paleta(self._tema_escuro, self.style.colors)
+        self._montar_estilos_visuais()
+        self._aplicar_cores_dinamicas_tabelas()
+        self._atualizar_texto_botao_tema()
+        preferencias.salvar_tema_escuro(self._tema_escuro)
+
+    def _atualizar_texto_botao_tema(self):
+        if not hasattr(self, "btn_alternar_tema"):
+            return
+        if self._tema_escuro:
+            self.btn_alternar_tema.config(text=f"{estilos.ICONE_TEMA_CLARO} Claro")
+        else:
+            self.btn_alternar_tema.config(text=f"{estilos.ICONE_TEMA_ESCURO} Escuro")
+
     # ------------------------------------------------------------------
     def _montar_cabecalho(self):
-        cabecalho = ttk.Frame(self, padding=(12, 12, 12, 8))
+        # Sub-fase 22b: o cabeçalho passou a ser uma SUPERFÍCIE (fundo
+        # branco, `estilos.COR_SUPERFICIE` -- que já é o padrão do tema,
+        # ver `_montar_estilos_visuais`) separada do resto da janela (o
+        # canvas cinza) por uma linha de 1px em vez de nenhuma fronteira
+        # visual, que era o caso antes (cabeçalho e corpo eram a mesma
+        # cor branca, sem nenhuma pista de que são áreas diferentes).
+        cabecalho = ttk.Frame(self, padding=(estilos.ESPACO_LG, estilos.ESPACO_MD), style="Header.TFrame")
         cabecalho.pack(side="top", fill="x")
 
         # Ações de ENTRADA à esquerda; a ação de SAÍDA ("Gerar planilha")
@@ -372,12 +681,23 @@ class App(tb.Window):
         # principal agora é a tela, não a barra. "Gerar planilha" é a única
         # exceção, porque é a ação que encerra o trabalho e não tem
         # equivalente em nenhuma outra aba.
-        entrada = ttk.Frame(cabecalho)
+        entrada = ttk.Frame(cabecalho, style="Header.TFrame")
         entrada.pack(side="left")
 
-        ttk.Label(entrada, text="Leitor de Matrículas", font=estilos.FONTE_TITULO_CABECALHO).pack(
-            side="left", padx=(0, 16)
+        ttk.Label(entrada, text="Leitor de Matrículas", style="HeaderTitulo.TLabel").pack(
+            side="left", padx=(0, estilos.ESPACO_SM)
         )
+        # Sub-fase 22e: o único controle de preferência real do programa
+        # (ver `ui/preferencias.py` -- a 21a/21d já auditaram e não
+        # acharam nenhuma outra opção de usuário real para expor, por
+        # isso isto é um botão discreto perto do título, não uma tela de
+        # "Configurações" inventada). O texto inicial é ajustado por
+        # `_atualizar_texto_botao_tema()`, chamado ao fim de
+        # `_montar_layout` -- aqui só precisa existir o widget.
+        self.btn_alternar_tema = ttk.Button(
+            entrada, text="", bootstyle="link", command=self._alternar_tema, width=9,
+        )
+        self.btn_alternar_tema.pack(side="left", padx=(0, estilos.ESPACO_LG))
 
         self.btn_imagem = ttk.Button(
             entrada, text="Fotos das folhas", bootstyle="primary-outline",
@@ -395,7 +715,7 @@ class App(tb.Window):
         )
         self.btn_limpar.pack(side="left")
 
-        saida = ttk.Frame(cabecalho)
+        saida = ttk.Frame(cabecalho, style="Header.TFrame")
         saida.pack(side="right")
         self.btn_salvar = ttk.Button(
             saida, text="Gerar planilha", bootstyle="success",
@@ -425,6 +745,10 @@ class App(tb.Window):
         self.lbl_progresso = ttk.Label(self._frame_progresso, text="", width=22, anchor="e")
         self.lbl_progresso.pack(side="left", padx=(10, 0))
 
+        # Fronteira visual entre o cabeçalho (branco) e o resto da janela
+        # (canvas cinza) -- ver `_montar_estilos_visuais`.
+        self._separador_horizontal()
+
     # ==================================================================
     # ABA INÍCIO -- o fluxo principal do trabalho (Fase 21a)
     #
@@ -435,18 +759,28 @@ class App(tb.Window):
     # acaba mostrando dois estados ao mesmo tempo.
     # ==================================================================
     def _montar_aba_inicio(self):
-        aba = ttk.Frame(self.abas, padding=(24, 18))
+        # Sub-fase 22b: a aba passou a ser CANVAS (`Canvas.TFrame`, o
+        # cinza-azulado de `estilos.COR_FUNDO`) para que os cartões
+        # brancos abaixo (`Card.TFrame`) apareçam por CONTRASTE DE FUNDO,
+        # não só por borda -- ver `_montar_estilos_visuais`. Qualquer
+        # texto que fique diretamente sobre esta aba (não dentro de um
+        # cartão) precisa do estilo `Canvas*` correspondente, senão herda
+        # o fundo branco padrão do `TLabel` e aparece como uma mancha
+        # clara sobre o cinza.
+        aba = ttk.Frame(self.abas, padding=(24, 18), style="Canvas.TFrame")
         self.abas.add(aba, text="Início")
         self._aba_inicio = aba
 
-        ttk.Label(aba, text="Leitor de Matrículas", font=estilos.FONTE_TITULO_PAGINA).pack(anchor="w")
+        ttk.Label(
+            aba, text="Leitor de Matrículas", font=estilos.FONTE_TITULO_PAGINA, style="Canvas.TLabel",
+        ).pack(anchor="w")
         ttk.Label(
             aba,
             text="Transforma as folhas de liberação — fotografadas ou em PDF — numa planilha conferida.",
-            bootstyle="secondary",
+            style="CanvasSecundario.TLabel",
         ).pack(anchor="w", pady=(2, 16))
 
-        self._container_fluxo = ttk.Frame(aba)
+        self._container_fluxo = ttk.Frame(aba, style="Canvas.TFrame")
         self._container_fluxo.pack(side="top", fill="both", expand=True)
 
         self._montar_cartao_pronto()
@@ -456,21 +790,31 @@ class App(tb.Window):
     # ------------------------------------------------------------------
     def _montar_cartao_pronto(self):
         """Etapa 1 (e também a tela de resultado): o que dá para fazer agora."""
-        cartao = ttk.Frame(self._container_fluxo)
+        cartao = ttk.Frame(self._container_fluxo, style="Canvas.TFrame")
         self._cartao_pronto = cartao
 
         # Faixa de conclusão -- só aparece logo depois de uma leva terminar.
         # É o que responde "acabou?" sem o operador ter de reparar que uma
-        # barra sumiu ou que uma palavra mudou no rodapé.
+        # barra sumiu ou que uma palavra mudou no rodapé. Fica sobre o
+        # canvas (fora de qualquer cartão), daí o estilo `Canvas.TLabel`
+        # -- a cor de sucesso vem de `bootstyle`, que continua funcionando
+        # junto com `style` (um dá a cor do texto, o outro o fundo/fonte).
         self.lbl_inicio_concluido = ttk.Label(
-            cartao, text="", bootstyle="success", font=estilos.FONTE_TITULO_SECAO,
+            cartao, text="", bootstyle="success", font=estilos.FONTE_TITULO_SECAO, style="Canvas.TLabel",
         )
 
-        acoes = ttk.Labelframe(cartao, text="O que você quer fazer?", padding=estilos.ESPACO_LG)
-        acoes.pack(side="top", fill="x")
+        # Sub-fase 22b: título comum (fora do cartão, na cor do canvas)
+        # substituindo o rótulo que o `ttk.Labelframe` cavalgava na
+        # própria borda -- é a troca de borda por espaço/contraste que
+        # `ui/estilos.py` documenta como critério.
+        titulo_acoes = ttk.Label(cartao, text="O que você quer fazer?", style="SecaoTitulo.TLabel")
+        titulo_acoes.pack(side="top", anchor="w", pady=(0, estilos.ESPACO_SM))
         # Guardado porque a faixa de conclusão é empacotada com `before=`
-        # ele -- assim ela aparece e some sem reordenar o resto do cartão.
-        self._moldura_acoes_inicio = acoes
+        # ele -- assim ela aparece e some sem reordenar o resto do cartão
+        # (tem que ficar ACIMA do título, não colada entre título e cartão).
+        self._moldura_acoes_inicio = titulo_acoes
+        acoes = ttk.Frame(cartao, style="Card.TFrame", padding=estilos.ESPACO_LG)
+        acoes.pack(side="top", fill="x")
         linha_botoes = ttk.Frame(acoes)
         linha_botoes.pack(side="top", fill="x")
         self.btn_inicio_imagens = ttk.Button(
@@ -490,8 +834,15 @@ class App(tb.Window):
             bootstyle="secondary", wraplength=760, justify="left",
         ).pack(side="top", anchor="w", pady=(10, 0))
 
-        # Resultado do que já foi processado nesta sessão.
-        self.moldura_resultado = ttk.Labelframe(cartao, text="Último processamento", padding=estilos.ESPACO_LG)
+        # Resultado do que já foi processado nesta sessão. O título fica
+        # sempre visível (packed aqui, na construção) porque o cartão
+        # abaixo dele também é sempre mostrado (mesmo vazio, com
+        # `lbl_resultado_vazio`) -- só o CONTEÚDO do cartão muda com o
+        # resultado, nunca a moldura em si (ver `_atualizar_cartao_pronto`).
+        ttk.Label(cartao, text="Último processamento", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(estilos.ESPACO_XL, estilos.ESPACO_SM),
+        )
+        self.moldura_resultado = ttk.Frame(cartao, style="Card.TFrame", padding=estilos.ESPACO_LG)
 
         self.lbl_resultado_vazio = ttk.Label(
             self.moldura_resultado, text=mensagens.VAZIO_SEM_PROCESSAMENTO, bootstyle="secondary",
@@ -554,10 +905,13 @@ class App(tb.Window):
         com as folhas erradas já misturadas aos resultados (que se
         ACUMULAM, ver `_on_limpar`).
         """
-        cartao = ttk.Frame(self._container_fluxo)
+        cartao = ttk.Frame(self._container_fluxo, style="Canvas.TFrame")
         self._cartao_selecao = cartao
 
-        moldura = ttk.Labelframe(cartao, text="Confira antes de processar", padding=estilos.ESPACO_LG)
+        ttk.Label(cartao, text="Confira antes de processar", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM),
+        )
+        moldura = ttk.Frame(cartao, style="Card.TFrame", padding=estilos.ESPACO_LG)
         moldura.pack(side="top", fill="x")
 
         self.lbl_selecao_titulo = ttk.Label(moldura, text="", font=estilos.FONTE_TITULO_CARTAO)
@@ -599,10 +953,13 @@ class App(tb.Window):
     # ------------------------------------------------------------------
     def _montar_cartao_processando(self):
         """Etapa 3: o que está acontecendo agora, e há quanto tempo."""
-        cartao = ttk.Frame(self._container_fluxo)
+        cartao = ttk.Frame(self._container_fluxo, style="Canvas.TFrame")
         self._cartao_processando = cartao
 
-        moldura = ttk.Labelframe(cartao, text="Processando", padding=estilos.ESPACO_LG)
+        ttk.Label(cartao, text="Processando", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM),
+        )
+        moldura = ttk.Frame(cartao, style="Card.TFrame", padding=estilos.ESPACO_LG)
         moldura.pack(side="top", fill="x")
 
         self.lbl_proc_titulo = ttk.Label(moldura, text="", font=estilos.FONTE_TITULO_CARTAO)
@@ -670,7 +1027,10 @@ class App(tb.Window):
         else:
             self.lbl_inicio_concluido.pack_forget()
 
-        self.moldura_resultado.pack(side="top", fill="x", pady=(16, 0))
+        # Sem pady extra aqui: o espaçamento acima já vem do título
+        # ("Último processamento", packed em `_montar_cartao_pronto`),
+        # que é sempre visível junto com este cartão.
+        self.moldura_resultado.pack(side="top", fill="x")
 
         if not total:
             self.frame_numeros.pack_forget()
@@ -779,13 +1139,17 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_aba_registros(self):
-        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
+        # Sub-fase 22d: mesma técnica canvas+cartão das demais abas -- a
+        # tabela (já era o elemento mais "de produto" da interface, achado
+        # 8 da auditoria 22a) ganha uma moldura de cartão branco sobre o
+        # canvas cinza, em vez de ficar solta contra o fundo da aba.
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD, style="Canvas.TFrame")
         self.abas.add(aba, text="Registros")
         self._aba_registros = aba
 
-        filtros = ttk.Frame(aba)
-        filtros.pack(side="top", fill="x", pady=(0, 8))
-        ttk.Label(filtros, text="Mostrar:").pack(side="left", padx=(0, 6))
+        filtros = ttk.Frame(aba, style="Canvas.TFrame")
+        filtros.pack(side="top", fill="x", pady=(0, estilos.ESPACO_SM))
+        ttk.Label(filtros, text="Mostrar:", style="Canvas.TLabel").pack(side="left", padx=(0, 6))
         self.filtro_var = tk.StringVar(value=FILTROS_TABELA[0])
         self.combo_filtro = ttk.Combobox(
             filtros, textvariable=self.filtro_var, values=list(FILTROS_TABELA),
@@ -793,7 +1157,7 @@ class App(tb.Window):
         )
         self.combo_filtro.pack(side="left")
         self.combo_filtro.bind("<<ComboboxSelected>>", lambda _e: self._sincronizar_tabela_principal())
-        self.lbl_contagem_tabela = ttk.Label(filtros, text="", bootstyle="secondary")
+        self.lbl_contagem_tabela = ttk.Label(filtros, text="", style="CanvasSecundario.TLabel")
         self.lbl_contagem_tabela.pack(side="left", padx=12)
 
         # Estado vazio (Fase 21a): uma grade de 12 colunas em branco não
@@ -801,11 +1165,11 @@ class App(tb.Window):
         # operador deveria estar preenchendo. O texto ocupa o lugar da
         # tabela enquanto não houver linha nenhuma e diz para onde ir.
         self.lbl_tabela_vazia = ttk.Label(
-            aba, text=mensagens.VAZIO_TABELA, bootstyle="secondary",
+            aba, text=mensagens.VAZIO_TABELA, style="CanvasSecundario.TLabel",
             justify="center", anchor="center",
         )
 
-        moldura = ttk.Frame(aba)
+        moldura = ttk.Frame(aba, style="Card.TFrame", padding=estilos.ESPACO_SM)
         self._moldura_tabela = moldura
         moldura.pack(side="top", fill="both", expand=True)
         # Sem bootstyle de cor nas tabelas: a moldura colorida do
@@ -860,8 +1224,15 @@ class App(tb.Window):
 
         Nada disto substitui `_revisao_confirmar` (Fase 7/12): esta função
         só monta widgets, nenhum deles decide nada.
+
+        Sub-fase 22c: as três áreas ganharam a mesma linguagem visual da
+        22b (título + `Card.TFrame` sobre `Canvas.TFrame`, no lugar de
+        `ttk.Labelframe`) -- a aba inteira passou a ser canvas cinza, com
+        cada área como um cartão branco flutuando dentro do seu painel do
+        `PanedWindow`. Nenhuma mudança de ESTRUTURA de informação: mesmas
+        três áreas, mesma ordem, mesmos widgets com os mesmos nomes.
         """
-        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD, style="Canvas.TFrame")
         self.abas.add(aba, text="Revisão")
         self._aba_revisao = aba
 
@@ -871,7 +1242,7 @@ class App(tb.Window):
         # a boa notícia), então o texto muda conforme o caso em
         # `_atualizar_estado_vazio_revisao`.
         self.lbl_revisao_vazio = ttk.Label(
-            aba, text="", bootstyle="secondary", anchor="center", justify="center",
+            aba, text="", style="CanvasSecundario.TLabel", anchor="center", justify="center",
         )
 
         painel = ttk.PanedWindow(aba, orient="horizontal")
@@ -879,8 +1250,17 @@ class App(tb.Window):
         painel.pack(side="top", fill="both", expand=True)
 
         # ---- área 1: lista de pendências -------------------------------
-        moldura_lista = ttk.Labelframe(painel, text="Pendências", padding=6)
-        painel.add(moldura_lista, weight=2)
+        # Um nível a mais que antes (painel_lista envolve título + cartão)
+        # -- é o mesmo padrão de `_montar_cartao_pronto` (22b): o painel do
+        # PanedWindow é canvas cinza, o título fica sobre ele, e só o
+        # cartão abaixo é branco.
+        painel_lista = ttk.Frame(painel, style="Canvas.TFrame", padding=(0, 0, estilos.ESPACO_SM, 0))
+        painel.add(painel_lista, weight=2)
+        ttk.Label(painel_lista, text="Pendências", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM)
+        )
+        moldura_lista = ttk.Frame(painel_lista, style="Card.TFrame", padding=estilos.ESPACO_MD)
+        moldura_lista.pack(side="top", fill="both", expand=True)
 
         self.lbl_revisao_progresso = ttk.Label(
             moldura_lista, text="", bootstyle="secondary", justify="left", wraplength=210,
@@ -938,9 +1318,19 @@ class App(tb.Window):
 
         moldura_lista_tabela = ttk.Frame(moldura_lista)
         moldura_lista_tabela.pack(side="top", fill="both", expand=True)
+        # `bootstyle="light"` (não `style=`) de propósito: o `ttkbootstrap`
+        # intercepta a CONSTRUÇÃO de todo widget `ttk` e recusa um nome de
+        # estilo customizado que não reconheça como uma de suas cores --
+        # `style="RevisaoLista.Treeview"` foi tentado e ignorado em
+        # silêncio (a Treeview voltava ao estilo `"Treeview"` plano,
+        # PARTILHADO com a tabela de Registros). `bootstyle="light"` é uma
+        # cor que o `ttkbootstrap` reconhece e usa para gerar um estilo
+        # PRÓPRIO ("light.Treeview"), isolado da tabela de Registros --
+        # é esse nome que `_montar_estilos_visuais` ajusta depois, só a
+        # cor da linha SELECIONADA (ver comentário lá).
         self.tabela_revisao_lista = ttk.Treeview(
             moldura_lista_tabela, columns=("pagina", "matricula", "pendencia"),
-            show="headings", selectmode="browse",
+            show="headings", selectmode="browse", bootstyle="light",
         )
         for coluna, titulo, largura in [
             ("pagina", "Pág.", 40), ("matricula", "Matrícula", 70), ("pendencia", "Pendência", 100),
@@ -952,7 +1342,16 @@ class App(tb.Window):
         # `explicacao_revisao.ROTULOS`.
         for campo, cor in CORES_TIPO_PENDENCIA.items():
             self.tabela_revisao_lista.tag_configure(campo, foreground=cor)
-        self.tabela_revisao_lista.tag_configure("outro", foreground=COR_TIPO_PENDENCIA_PADRAO)
+        # `estilos.COR_TIPO_PENDENCIA_PADRAO` (atributo, não import direto
+        # -- é uma string, `aplicar_paleta()` REBINDA o nome no módulo,
+        # e só o acesso por atributo enxerga o valor novo depois disso).
+        self.tabela_revisao_lista.tag_configure("outro", foreground=estilos.COR_TIPO_PENDENCIA_PADRAO)
+        # Sub-fase 22c: realce sutil sob o cursor (hover), só de fundo --
+        # nunca muda a cor de texto por tipo de campo, que continua vindo
+        # das tags acima. Puramente cosmético: não participa da seleção
+        # real (`tabela.selection()`), só do que o olho segue no mouse.
+        self.tabela_revisao_lista.tag_configure("hover", background=estilos.COR_FUNDO)
+        self._aplicar_selecao_lista_revisao()
         vsb_lista = ttk.Scrollbar(moldura_lista_tabela, orient="vertical", command=self.tabela_revisao_lista.yview)
         self.tabela_revisao_lista.configure(yscrollcommand=vsb_lista.set)
         self.tabela_revisao_lista.grid(row=0, column=0, sticky="nsew")
@@ -963,6 +1362,11 @@ class App(tb.Window):
         # ação que "Próximo"/"Anterior" fazem, só que por escolha, não em
         # sequência.
         self.tabela_revisao_lista.bind("<<TreeviewSelect>>", self._on_selecionar_pendencia_lista)
+        # Sub-fase 22c: hover sutil -- só troca a tag "hover" da linha sob o
+        # cursor, nunca a seleção real nem `revisao_vars`. `<Leave>` limpa
+        # ao sair da lista inteira.
+        self.tabela_revisao_lista.bind("<Motion>", self._on_hover_lista_revisao)
+        self.tabela_revisao_lista.bind("<Leave>", self._limpar_hover_lista_revisao)
         # Sub-fase 21d: ← → como atalho de "Anterior"/"Próximo" -- só
         # ativo quando a LISTA tem o foco (não o formulário), então nunca
         # interfere com o cursor de texto dentro de Data/Hora/Matrícula
@@ -975,16 +1379,22 @@ class App(tb.Window):
         self.tabela_revisao_lista.bind("<Right>", self._on_seta_direita_revisao)
 
         # ---- área 2: a foto da folha ------------------------------------
-        # Padding menor de propósito (ESPACO_SM, não ESPACO_MD como as
-        # demais seções): é a foto que precisa do espaço, não a moldura.
-        moldura_foto = ttk.Labelframe(painel, text="Folha digitalizada", padding=estilos.ESPACO_SM)
-        painel.add(moldura_foto, weight=4)
+        # Mesmo padrão de título + Card da área 1. Padding do cartão menor
+        # de propósito (ESPACO_SM, não ESPACO_MD como as demais seções): é
+        # a foto que precisa do espaço, não a moldura ao redor dela.
+        painel_foto = ttk.Frame(painel, style="Canvas.TFrame", padding=(estilos.ESPACO_SM, 0))
+        painel.add(painel_foto, weight=4)
+        ttk.Label(painel_foto, text="Folha digitalizada", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM)
+        )
+        moldura_foto = ttk.Frame(painel_foto, style="Card.TFrame", padding=estilos.ESPACO_SM)
+        moldura_foto.pack(side="top", fill="both", expand=True)
 
         controles_foto = ttk.Frame(moldura_foto)
         controles_foto.pack(side="top", fill="x", pady=(0, 6))
-        ttk.Button(controles_foto, text="−", width=3, bootstyle="secondary-outline",
+        ttk.Button(controles_foto, text=estilos.ICONE_ZOOM_DIMINUIR, width=3, bootstyle="secondary-outline",
                    command=lambda: self._ajustar_zoom(0.8)).pack(side="left")
-        ttk.Button(controles_foto, text="+", width=3, bootstyle="secondary-outline",
+        ttk.Button(controles_foto, text=estilos.ICONE_ZOOM_AUMENTAR, width=3, bootstyle="secondary-outline",
                    command=lambda: self._ajustar_zoom(1.25)).pack(side="left", padx=(4, 0))
         ttk.Button(controles_foto, text="Ajustar", bootstyle="secondary-outline",
                    command=self._ajustar_zoom_para_caber).pack(side="left", padx=(4, 0))
@@ -993,7 +1403,13 @@ class App(tb.Window):
 
         moldura_canvas = ttk.Frame(moldura_foto)
         moldura_canvas.pack(side="top", fill="both", expand=True)
-        self.canvas_foto = tk.Canvas(moldura_canvas, background="#f1f3f5", highlightthickness=0)
+        # Moldura de 1px ao redor do visor -- um "passe-partout" claro
+        # (COR_FUNDO) delimitado por uma borda discreta (COR_BORDA), em vez
+        # de a foto encostar direto na borda do cartão branco.
+        self.canvas_foto = tk.Canvas(
+            moldura_canvas, background=estilos.COR_FUNDO,
+            highlightthickness=1, highlightbackground=estilos.COR_BORDA,
+        )
         vsb_foto = ttk.Scrollbar(moldura_canvas, orient="vertical", command=self.canvas_foto.yview)
         hsb_foto = ttk.Scrollbar(moldura_canvas, orient="horizontal", command=self.canvas_foto.xview)
         self.canvas_foto.configure(yscrollcommand=vsb_foto.set, xscrollcommand=hsb_foto.set)
@@ -1004,20 +1420,24 @@ class App(tb.Window):
         moldura_canvas.columnconfigure(0, weight=1)
 
         # ---- área 3: o que decidir e como confirmar ----------------------
-        moldura_form = ttk.Frame(painel, padding=(12, 0, 0, 0))
+        # Canvas cinza (mesmo padrão das áreas 1/2) -- as três seções
+        # abaixo ("Por que está em revisão", "Campos lidos da folha",
+        # "Obtido da base pela matrícula") viram título + Card sobre ele.
+        moldura_form = ttk.Frame(painel, padding=(estilos.ESPACO_MD, 0, 0, 0), style="Canvas.TFrame")
         painel.add(moldura_form, weight=3)
 
-        topo = ttk.Frame(moldura_form)
+        topo = ttk.Frame(moldura_form, style="Canvas.TFrame")
         topo.pack(side="top", fill="x")
-        self.lbl_revisao_posicao = ttk.Label(topo, text="", font=estilos.FONTE_ROTULO_FORTE)
+        self.lbl_revisao_posicao = ttk.Label(topo, text="", style="PosicaoRevisao.TLabel")
         self.lbl_revisao_posicao.pack(side="left")
 
         # Resumo do bloqueio: SEMPRE visível, uma frase curta ("A dúvida
         # está em: Data"), para o operador nunca precisar abrir nada só
-        # para saber o que está em jogo nesta linha.
+        # para saber o que está em jogo nesta linha. `ResumoRevisao.TLabel`
+        # usa `COR_ATENCAO` (a mesma cor forte de "warning" do tema, só
+        # com fundo compatível com o canvas -- ver `_montar_estilos_visuais`).
         self.lbl_revisao_resumo = ttk.Label(
-            moldura_form, text="", bootstyle="warning", wraplength=430,
-            justify="left", font=estilos.FONTE_ROTULO_MEDIO,
+            moldura_form, text="", style="ResumoRevisao.TLabel", wraplength=430, justify="left",
         )
         self.lbl_revisao_resumo.pack(side="top", fill="x", pady=(8, 2))
 
@@ -1026,18 +1446,27 @@ class App(tb.Window):
         # normalização, o que a base respondeu); aqui ela só deixou de
         # aparecer sempre aberta, para não dominar a tela. Nunca expõe
         # nome de estrutura interna (DossieRegistro/Evidencia/limiar) --
-        # `explicacao_revisao` já entrega só linguagem de operador.
+        # `explicacao_revisao` já entrega só linguagem de operador. É a
+        # ação TERCIÁRIA da tela (bootstyle "link", sem peso de botão).
         self.btn_revisao_detalhes = ttk.Button(
-            moldura_form, text="Ver detalhes ▸", bootstyle="link",
+            moldura_form, text=f"Ver detalhes {estilos.ICONE_EXPANDIR}", bootstyle="link",
             command=self._alternar_detalhes_revisao, padding=0,
         )
         self.btn_revisao_detalhes.pack(side="top", anchor="w", pady=(0, 4))
 
-        self.moldura_revisao_explicacao = ttk.Labelframe(
-            moldura_form, text="Por que está em revisão", padding=estilos.ESPACO_MD,
-        )
+        # `self.moldura_revisao_explicacao` continua sendo o widget que
+        # `_atualizar_visibilidade_detalhes_revisao` mostra/esconde -- só
+        # que agora é o GRUPO inteiro (título + cartão), não um
+        # `Labelframe` sozinho. O comportamento de expandir/recolher não
+        # mudou uma linha.
+        self.moldura_revisao_explicacao = ttk.Frame(moldura_form, style="Canvas.TFrame")
+        ttk.Label(
+            self.moldura_revisao_explicacao, text="Por que está em revisão", style="SecaoTitulo.TLabel",
+        ).pack(side="top", anchor="w", pady=(0, estilos.ESPACO_SM))
+        _card_explicacao = ttk.Frame(self.moldura_revisao_explicacao, style="Card.TFrame", padding=estilos.ESPACO_MD)
+        _card_explicacao.pack(side="top", fill="x")
         self.lbl_revisao_explicacao = ttk.Label(
-            self.moldura_revisao_explicacao, text="", wraplength=420, justify="left",
+            _card_explicacao, text="", wraplength=420, justify="left",
         )
         self.lbl_revisao_explicacao.pack(side="top", fill="x", anchor="w")
         # Os sinais de contexto (Fase 16/18 -- gestores do lote, ordem
@@ -1046,14 +1475,27 @@ class App(tb.Window):
         # é literalmente "a sugestão que o sistema já produziu, perto do
         # campo bloqueante", que é o pedido da 21b.
 
-        campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=estilos.ESPACO_MD)
+        # `self.moldura_revisao_campos` continua sendo a âncora do
+        # `before=` que insere o painel de detalhes ACIMA desta seção
+        # (ver `_atualizar_visibilidade_detalhes_revisao`) -- por isso
+        # aponta para o GRUPO (título + cartão), não só o cartão.
+        campos_grupo = ttk.Frame(moldura_form, style="Canvas.TFrame")
+        campos_grupo.pack(side="top", fill="x")
+        self.moldura_revisao_campos = campos_grupo
+        ttk.Label(campos_grupo, text="Campos lidos da folha", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM)
+        )
+        campos = ttk.Frame(campos_grupo, style="Card.TFrame", padding=estilos.ESPACO_MD)
         campos.pack(side="top", fill="x")
-        self.moldura_revisao_campos = campos
 
         self.revisao_vars = {}
         self.revisao_widgets = {}
         self.revisao_rotulos = {}
         self.revisao_dicas = {}
+        # Sub-fase 22c: o texto ORIGINAL de cada rótulo (sem o ícone de
+        # alerta), para `_destacar_campos_revisao` poder reconstruí-lo a
+        # cada troca de registro sem acumular ícone repetido.
+        self._revisao_rotulos_texto = {}
         # MOTIVO e RESPONSÁVEL viram lista fechada (Combobox) porque o valor
         # válido só pode ser um dos cadastrados -- digitar à mão aqui só
         # criaria um valor que a validação vai recusar em seguida. Ficam
@@ -1068,6 +1510,7 @@ class App(tb.Window):
         ]
         for i, (chave, rotulo, tipo, fonte_valores) in enumerate(linhas):
             linha_campo = 2 * i
+            self._revisao_rotulos_texto[chave] = rotulo
             rotulo_widget = ttk.Label(campos, text=rotulo)
             rotulo_widget.grid(row=linha_campo, column=0, sticky="w", pady=(4, 0), padx=(0, 10))
             var = tk.StringVar()
@@ -1102,28 +1545,45 @@ class App(tb.Window):
             bootstyle="secondary", justify="left",
         ).grid(row=2 * len(linhas), column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        derivados = ttk.Labelframe(moldura_form, text="Obtido da base pela matrícula", padding=estilos.ESPACO_MD)
-        derivados.pack(side="top", fill="x", pady=(10, 0))
+        derivados_grupo = ttk.Frame(moldura_form, style="Canvas.TFrame")
+        derivados_grupo.pack(side="top", fill="x", pady=(10, 0))
+        ttk.Label(derivados_grupo, text="Obtido da base pela matrícula", style="SecaoTitulo.TLabel").pack(
+            side="top", anchor="w", pady=(0, estilos.ESPACO_SM)
+        )
+        derivados = ttk.Frame(derivados_grupo, style="Card.TFrame", padding=estilos.ESPACO_MD)
+        derivados.pack(side="top", fill="x")
         self.lbl_revisao_nome = ttk.Label(derivados, text="—", wraplength=430, justify="left")
         self.lbl_revisao_nome.pack(side="top", anchor="w")
         self.lbl_revisao_setor = ttk.Label(derivados, text="—", bootstyle="secondary", wraplength=430, justify="left")
         self.lbl_revisao_setor.pack(side="top", anchor="w", pady=(2, 0))
 
-        self.lbl_revisao_resultado = ttk.Label(moldura_form, text="", wraplength=430, justify="left")
+        # Erro de confirmação ("Ainda não é possível confirmar: ...") --
+        # `style` fixo em vez de `bootstyle="danger"` dinâmico (ver
+        # `_revisao_confirmar`): o texto SEMPRE que aparece aqui é erro, e
+        # `bootstyle` sozinho não define o fundo (ficaria uma mancha branca
+        # sobre o canvas cinza -- ver `_montar_estilos_visuais`).
+        self.lbl_revisao_resultado = ttk.Label(
+            moldura_form, text="", style="ResultadoRevisaoErro.TLabel", wraplength=430, justify="left",
+        )
         self.lbl_revisao_resultado.pack(side="top", fill="x", pady=(10, 0))
 
-        acoes = ttk.Frame(moldura_form)
+        # Hierarquia de ações: PRINCIPAL (Confirmar, sólida/success, a que
+        # encerra a decisão desta linha) à direita; SECUNDÁRIA (Anterior/
+        # Próximo, outline, navegação sem decisão) agrupada à esquerda.
+        # Já era essa a hierarquia desde a 21b -- aqui só os tokens de
+        # ícone/espaçamento da 22a entraram no lugar de texto/pixel soltos.
+        acoes = ttk.Frame(moldura_form, style="Canvas.TFrame")
         acoes.pack(side="bottom", fill="x", pady=(12, 0))
         self.btn_revisao_anterior = ttk.Button(
-            acoes, text="◀ Anterior", bootstyle="secondary-outline",
+            acoes, text=f"{estilos.ICONE_ANTERIOR} Anterior", bootstyle="secondary-outline",
             command=lambda: self._revisao_navegar(-1), width=12,
         )
         self.btn_revisao_anterior.pack(side="left")
         self.btn_revisao_proximo = ttk.Button(
-            acoes, text="Próximo ▶", bootstyle="secondary-outline",
+            acoes, text=f"Próximo {estilos.ICONE_PROXIMO}", bootstyle="secondary-outline",
             command=lambda: self._revisao_navegar(1), width=12,
         )
-        self.btn_revisao_proximo.pack(side="left", padx=(6, 0))
+        self.btn_revisao_proximo.pack(side="left", padx=(estilos.ESPACO_SM, 0))
         # "Confirmar e próximo": o nome descreve o que acontece de fato --
         # `_revisao_confirmar` (Fase 7/12, intocada) já avança para a
         # próxima pendência sozinha quando a linha sai de REVISAO, porque a
@@ -1137,17 +1597,17 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_aba_avisos(self):
-        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD)
+        aba = ttk.Frame(self.abas, padding=estilos.ESPACO_MD, style="Canvas.TFrame")
         self.abas.add(aba, text="Avisos")
         self._aba_avisos = aba
 
         ttk.Label(
             aba,
             text="Nada aqui bloqueia o processamento — são apontamentos para conferência no papel.",
-            bootstyle="secondary",
-        ).pack(side="top", anchor="w", pady=(0, 8))
+            style="CanvasSecundario.TLabel",
+        ).pack(side="top", anchor="w", pady=(0, estilos.ESPACO_SM))
 
-        moldura = ttk.Frame(aba)
+        moldura = ttk.Frame(aba, style="Card.TFrame", padding=estilos.ESPACO_SM)
         moldura.pack(side="top", fill="both", expand=True)
         self.tabela_avisos = ttk.Treeview(
             moldura, columns=("tipo", "pagina", "mensagem"), show="headings",
@@ -1158,6 +1618,14 @@ class App(tb.Window):
         ]:
             self.tabela_avisos.heading(coluna, text=titulo)
             self.tabela_avisos.column(coluna, width=largura, anchor=ancora, stretch=(coluna == "mensagem"))
+        # Sub-fase 22d: hover sutil, mesma técnica da lista de pendências
+        # (22c) -- só faz sentido aqui porque as linhas de Avisos não têm
+        # cor de fundo própria (ao contrário de Registros, que já usa o
+        # fundo para dizer o status -- ver decisão registrada no relatório
+        # sobre não sobrepor hover a essa cor).
+        self.tabela_avisos.tag_configure("hover", background=estilos.COR_FUNDO)
+        self.tabela_avisos.bind("<Motion>", self._on_hover_generico(self.tabela_avisos))
+        self.tabela_avisos.bind("<Leave>", self._limpar_hover_generico(self.tabela_avisos))
         vsb = ttk.Scrollbar(moldura, orient="vertical", command=self.tabela_avisos.yview)
         self.tabela_avisos.configure(yscrollcommand=vsb.set)
         self.tabela_avisos.grid(row=0, column=0, sticky="nsew")
@@ -1167,17 +1635,22 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_rodape(self):
-        rodape = ttk.Frame(self, padding=(12, 0, 12, 10))
+        rodape = ttk.Frame(self, padding=(12, 0, 12, 10), style="Header.TFrame")
         rodape.pack(side="bottom", fill="x")
+        # Mesma fronteira visual do cabeçalho (ver `_montar_cabecalho`),
+        # do lado de baixo -- precisa ser packed DEPOIS do rodapé para
+        # ficar entre ele e o canvas (pack empilha lados "bottom" na
+        # ordem em que são chamados, do mais próximo da borda em diante).
+        self._separador_horizontal(lado="bottom")
 
-        self.lbl_status = ttk.Label(rodape, text="Nenhum arquivo selecionado.")
+        self.lbl_status = ttk.Label(rodape, text="Nenhum arquivo selecionado.", style="Header.TLabel")
         self.lbl_status.pack(side="left")
 
         # Prefixo "Bases:" para que os três números do rodapé se leiam como
         # o que são -- o conteúdo das planilhas de referência carregadas --
         # e não como mais um contador do lote em andamento.
         self.lbl_bases = ttk.Label(
-            rodape, text=f"Bases: {self._data_manager.resumo_status()}", bootstyle="secondary",
+            rodape, text=f"Bases: {self._data_manager.resumo_status()}", style="HeaderSecundario.TLabel",
         )
         self.lbl_bases.pack(side="right")
 
@@ -1346,7 +1819,16 @@ class App(tb.Window):
         texto_tecnico = detalhe or (str(excecao) if excecao is not None else "")
         titulo, corpo = mensagens.descrever_falha(categoria, texto_tecnico)
         self.lbl_status.config(text=f"Erro: {titulo}")
-        messagebox.showerror(titulo, corpo)
+        # Sub-fase 22d: `Messagebox` (ttkbootstrap), não `tkinter.
+        # messagebox` -- achado 7 da auditoria 22a ("o ponto de maior
+        # ruptura visual"): o diálogo nativo do SO não tem nenhuma relação
+        # com o tema da aplicação. `Messagebox` desenha no mesmo tema
+        # `cosmo`, com os mesmos ícones/botões do resto do app. A
+        # microcopy (`titulo`/`corpo`, vinda de `ui/mensagens.py`) não
+        # muda -- só a moldura em volta dela. Ordem dos argumentos
+        # invertida em relação ao `tkinter.messagebox` (mensagem primeiro,
+        # título depois).
+        Messagebox.show_error(corpo, titulo, parent=self)
 
     def _iniciar_processamento(self, texto_status):
         self._processando = True
@@ -2008,6 +2490,9 @@ class App(tb.Window):
     # ==================================================================
     def _atualizar_avisos(self):
         self.tabela_avisos.delete(*self.tabela_avisos.get_children())
+        # A reconstrução apaga todos os itens -- o iid em hover (se algum,
+        # ver `_on_hover_generico`) deixou de existir junto.
+        self.tabela_avisos._hover_item = None
         for aviso in self._data_manager.avisos:
             self.tabela_avisos.insert("", "end", values=("Base de dados", "—", aviso))
         for e in self._erros_paginas:
@@ -2023,32 +2508,35 @@ class App(tb.Window):
             self.tabela_avisos.insert("", "end", values=("—", "—", mensagens.VAZIO_AVISOS))
         self._atualizar_rotulos_abas()
 
-    # Mantidos: o fluxo por messagebox continua disponível (e é o que os
+    # Mantidos: o fluxo por diálogo continua disponível (e é o que os
     # testes de regressão exercitam), agora além da aba consolidada.
+    # Sub-fase 22d: `Messagebox` no lugar de `tkinter.messagebox` -- ver
+    # nota em `_mostrar_falha`; mesma microcopy, mesma ordem de chamada
+    # invertida (mensagem, título).
     def _mostrar_avisos_bases(self):
         if not self._data_manager.avisos:
             return
         msg = "\n\n".join(self._data_manager.avisos)
         msg += "\n\nColoque os arquivos em dados/ e reabra o programa."
-        messagebox.showwarning("Avisos sobre as bases de dados", msg)
+        Messagebox.show_warning(msg, "Avisos sobre as bases de dados", parent=self)
 
     def _mostrar_erros_paginas(self):
         if not self._erros_paginas:
             return
         msg = "\n\n".join(f"Página {e['pagina']}: {e['mensagem']}" for e in self._erros_paginas)
-        messagebox.showwarning("Erros de página", msg)
+        Messagebox.show_warning(msg, "Erros de página", parent=self)
 
     def _mostrar_avisos_contagem(self):
         if not self._avisos_contagem:
             return
         msg = "\n\n".join(f"Página {a['pagina']}: {a['mensagem']}" for a in self._avisos_contagem)
-        messagebox.showwarning("Avisos de contagem de posições", msg)
+        Messagebox.show_warning(msg, "Avisos de contagem de posições", parent=self)
 
     def _mostrar_avisos_descarte(self):
         if not self._avisos_descarte:
             return
         msg = "\n\n".join(f"Página {a['pagina']}: {a['mensagem']}" for a in self._avisos_descarte)
-        messagebox.showwarning("Linhas sem matrícula identificável", msg)
+        Messagebox.show_warning(msg, "Linhas sem matrícula identificável", parent=self)
 
     # ==================================================================
     # Limpar / salvar
@@ -2141,7 +2629,7 @@ class App(tb.Window):
 
     def _on_salvar(self):
         if not self._registros_exportacao:
-            messagebox.showwarning("Nada para salvar", "Ainda não há registros processados.")
+            Messagebox.show_warning("Ainda não há registros processados.", "Nada para salvar", parent=self)
             return
         path = filedialog.asksaveasfilename(
             title="Salvar planilha como", defaultextension=".xlsx",
@@ -2170,11 +2658,12 @@ class App(tb.Window):
             "e foram exportados assim, na aba “Revisão” da planilha."
             if pendentes else ""
         )
-        messagebox.showinfo(
-            "Planilha gerada",
+        Messagebox.show_info(
             f"{len(self._registros_exportacao)} registro(s) de "
             f"{mensagens.plural_folhas(self._paginas_processadas)} foram salvos em:\n{path}"
             f"{aviso_pendentes}",
+            "Planilha gerada",
+            parent=self,
         )
         self.lbl_status.config(text=f"Planilha gerada: {os.path.basename(path)}")
         pasta = os.path.dirname(os.path.abspath(path))
@@ -2213,15 +2702,16 @@ class App(tb.Window):
         pendentes = self._indices_pendentes_revisao()
         if not pendentes:
             if self._erros_paginas:
-                messagebox.showinfo(
-                    "Revisão",
+                Messagebox.show_info(
                     "Não há registros em revisão manual.\n\n"
                     f"Há {len(self._erros_paginas)} página(s) com ERRO de processamento — "
                     "veja a aba \"Avisos\" (essas páginas precisam ser "
                     "reprocessadas, não corrigidas campo a campo).",
+                    "Revisão",
+                    parent=self,
                 )
             else:
-                messagebox.showinfo("Revisão", "Não há registros pendentes de revisão.")
+                Messagebox.show_info("Não há registros pendentes de revisão.", "Revisão", parent=self)
             return
 
         if posicao is not None:
@@ -2394,6 +2884,9 @@ class App(tb.Window):
             pendentes = self._indices_pendentes_revisao()
         tabela = self.tabela_revisao_lista
         tabela.delete(*tabela.get_children())
+        # A reconstrução apaga todos os itens -- o iid em hover (se algum)
+        # deixou de existir junto.
+        self._hover_item_revisao = None
         termo_busca = self._texto_busca_revisao()
         mostradas = 0
         for posicao, indice in enumerate(pendentes):
@@ -2482,6 +2975,74 @@ class App(tb.Window):
         if posicao != self._revisao_posicao:
             self._revisao_ir_para(posicao)
 
+    # Sub-fase 22c: hover sutil na lista de pendências -- puramente visual,
+    # não participa da seleção real nem de nenhuma decisão. `_hover_item_
+    # revisao` só existe para saber qual linha "desligar" quando o cursor
+    # sai dela ou entra em outra.
+    def _on_hover_lista_revisao(self, evento):
+        try:
+            item = self.tabela_revisao_lista.identify_row(evento.y)
+        except Exception:
+            return
+        if item == self._hover_item_revisao:
+            return
+        self._limpar_hover_lista_revisao()
+        if item:
+            tags = list(self.tabela_revisao_lista.item(item, "tags"))
+            if "hover" not in tags:
+                tags.append("hover")
+                self.tabela_revisao_lista.item(item, tags=tags)
+            self._hover_item_revisao = item
+
+    def _limpar_hover_lista_revisao(self, _evento=None):
+        item = self._hover_item_revisao
+        try:
+            if item and self.tabela_revisao_lista.exists(item):
+                tags = [t for t in self.tabela_revisao_lista.item(item, "tags") if t != "hover"]
+                self.tabela_revisao_lista.item(item, tags=tags)
+        except Exception:
+            pass
+        self._hover_item_revisao = None
+
+    # Sub-fase 22d: versão GENÉRICA do mesmo hover, para tabelas que não
+    # têm um atributo de instância dedicado como `_hover_item_revisao`
+    # (hoje: a aba Avisos). Guarda o item em hover como atributo dinâmico
+    # no próprio widget (`tabela._hover_item`) -- widgets `ttk` são
+    # objetos Python comuns, aceitam atributo novo sem problema -- em vez
+    # de um dicionário à parte em `self`, para cada Treeview cuidar do
+    # próprio estado sem colidir com o de outra. Não reaproveitado pela
+    # lista de pendências de propósito: `_on_hover_lista_revisao` já
+    # existe, é testada por nome próprio, e trocar sua assinatura agora
+    # seria mexer em algo que já funciona sem ganho nenhum.
+    def _on_hover_generico(self, tabela):
+        def _handler(evento):
+            try:
+                item = tabela.identify_row(evento.y)
+            except Exception:
+                return
+            if item == getattr(tabela, "_hover_item", None):
+                return
+            self._limpar_hover_generico(tabela)()
+            if item:
+                tags = list(tabela.item(item, "tags"))
+                if "hover" not in tags:
+                    tags.append("hover")
+                    tabela.item(item, tags=tags)
+                tabela._hover_item = item
+        return _handler
+
+    def _limpar_hover_generico(self, tabela):
+        def _handler(_evento=None):
+            item = getattr(tabela, "_hover_item", None)
+            try:
+                if item and tabela.exists(item):
+                    tags = [t for t in tabela.item(item, "tags") if t != "hover"]
+                    tabela.item(item, tags=tags)
+            except Exception:
+                pass
+            tabela._hover_item = None
+        return _handler
+
     # Sub-fase 21d: atalhos ← → na lista de pendências. Métodos nomeados
     # (não lambdas) só para a ligação ficar identificável ao inspecionar o
     # binding do Tk -- o comportamento é exatamente `_revisao_navegar`, o
@@ -2500,12 +3061,12 @@ class App(tb.Window):
 
     def _atualizar_visibilidade_detalhes_revisao(self):
         if self._revisao_detalhes_expandido:
-            self.btn_revisao_detalhes.config(text="Ocultar detalhes ▾")
+            self.btn_revisao_detalhes.config(text=f"Ocultar detalhes {estilos.ICONE_RECOLHER}")
             self.moldura_revisao_explicacao.pack(
                 side="top", fill="x", pady=(0, 10), before=self.moldura_revisao_campos
             )
         else:
-            self.btn_revisao_detalhes.config(text="Ver detalhes ▸")
+            self.btn_revisao_detalhes.config(text=f"Ver detalhes {estilos.ICONE_EXPANDIR}")
             self.moldura_revisao_explicacao.pack_forget()
 
     def _explicacao_revisao_atual(self):
@@ -2571,23 +3132,40 @@ class App(tb.Window):
 
     def _destacar_campos_revisao(self, campos_bloqueantes, sinais):
         """
-        Dá destaque visual ao(s) campo(s) que bloqueiam a linha (rótulo e
-        caixa em vermelho) e mostra, colada ao campo, a sugestão de
-        contexto que o sistema já tinha produzido -- nunca um candidato
-        novo calculado aqui, nunca pré-selecionado no campo (`revisao_vars`
-        não é tocado por este método).
+        Dá destaque visual ao(s) campo(s) que bloqueiam a linha e mostra,
+        colada ao campo, a sugestão de contexto que o sistema já tinha
+        produzido -- nunca um candidato novo calculado aqui, nunca
+        pré-selecionado no campo (`revisao_vars` não é tocado por este
+        método).
+
+        Sub-fase 22c: refinado para não "pintar a tela inteira de
+        vermelho" (pedido do escopo) -- antes rótulo E caixa ficavam
+        vermelhos ao mesmo tempo. Agora só a CAIXA (`revisao_widgets`,
+        bootstyle "danger" -- convenção padrão de campo inválido em
+        formulário, e o que o teste estrutural da 21b trava) continua
+        vermelha; o RÓTULO ganha o ícone de alerta (`ICONE_REVISAO`) e
+        fica em negrito, na cor normal de texto -- ainda inconfundível
+        (ícone + negrito + a caixa vermelha ao lado), com uma única cor
+        de alerta na linha em vez de duas.
         """
         dicas_por_campo = {}
         for sinal in sinais:
-            texto = f"ⓘ {sinal.motivo}"
+            texto = f"{estilos.ICONE_INFO} {sinal.motivo}"
             if sinal.valor_observado:
                 texto += f"\n    {sinal.valor_observado}"
             dicas_por_campo.setdefault(sinal.campo, []).append(texto)
 
         for chave in self.revisao_rotulos:
             bloqueado = chave in campos_bloqueantes
+            texto_base = self._revisao_rotulos_texto.get(chave, chave)
             try:
-                self.revisao_rotulos[chave].config(bootstyle=("danger" if bloqueado else "default"))
+                rotulo_widget = self.revisao_rotulos[chave]
+                if bloqueado:
+                    rotulo_widget.config(
+                        text=f"{estilos.ICONE_REVISAO} {texto_base}", font=estilos.FONTE_ROTULO_MEDIO,
+                    )
+                else:
+                    rotulo_widget.config(text=texto_base, font=("", 9, "normal"))
                 self.revisao_widgets[chave].config(bootstyle=("danger" if bloqueado else "default"))
             except Exception:
                 pass
@@ -2821,15 +3399,22 @@ class App(tb.Window):
                 self._revisao_posicao = min(self._revisao_posicao, len(pendentes) - 1)
             self._atualizar_painel_revisao()
             if not pendentes:
-                messagebox.showinfo("Revisão", "Todos os registros pendentes foram revisados.")
+                # Sub-fase 22d: `Messagebox` no lugar de `tkinter.
+                # messagebox` (ver nota em `_mostrar_falha`) -- única linha
+                # tocada dentro de `_revisao_confirmar` por esta sub-fase,
+                # puramente cosmética, mesmo texto.
+                Messagebox.show_info("Todos os registros pendentes foram revisados.", "Revisão", parent=self)
         else:
             # Ainda não pôde ser confirmado -- permanece na lista, com a
             # observação atualizada, em vez de desaparecer como se
             # tivesse sido resolvido.
             self._atualizar_painel_revisao()
+            # Sub-fase 22c: o estilo (cor de erro + fundo compatível com o
+            # canvas) já vem fixado na construção do label -- ver
+            # `_montar_aba_revisao`. Nenhuma mudança de comportamento: o
+            # texto é o mesmo que já era escrito aqui.
             self.lbl_revisao_resultado.config(
                 text=f"Ainda não é possível confirmar: {resultado.observacao}",
-                bootstyle="danger",
             )
 
     # Nome anterior mantido: o fluxo de correção manual é o mesmo.
