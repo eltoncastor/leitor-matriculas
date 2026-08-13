@@ -39,6 +39,47 @@ python web\backend\testes\teste_api_mock.py
 python web\backend\testes\teste_api_lote_real.py
 ```
 
-## Frontend (Fase 24b — ainda não implementado)
+## Frontend (Fase 24b)
 
-React + Tailwind (Vite), planejado para `web/frontend/`.
+React + Tailwind v4 (Vite), em `web/frontend/`. Precisa do backend acima rodando em
+`127.0.0.1:8000` — o dev server do Vite faz proxy de `/api/*` para lá (ver
+`web/frontend/vite.config.js`).
+
+```powershell
+cd web\frontend
+npm install
+npm run dev       # http://localhost:5173
+```
+
+**Sem Node.js instalado?** Se `winget install OpenJS.NodeJS.LTS` travar esperando
+elevação de administrador (ambiente sem privilégio interativo), baixe a distribuição
+portátil oficial (zip, sem instalador) em https://nodejs.org/en/download e extraia-a em
+qualquer pasta local — não precisa instalar no sistema, só ter `node`/`npm` no `PATH` da
+sessão em que você rodar os comandos acima. Foi assim que esta sub-fase foi desenvolvida
+(pasta `.tools/`, gitignored — ver `saida/avaliacao_fase24_web.md`, seção 24b).
+
+Outros comandos:
+
+```powershell
+npm run test       # Vitest -- rápido, roda a cada alteração
+npm run build       # build de produção em web\frontend\dist
+npm run lint         # oxlint
+```
+
+### Estrutura
+
+```
+web/frontend/src/
+  lib/api.js               -- único ponto que fala com o backend (os 6 endpoints)
+  components/ui/            -- Button, GlassCard, ProgressBar, StatusBadge
+  components/layout/         -- AppShell (cabeçalho + fundo, sem lógica)
+  features/lote/               -- telas do fluxo de um lote (Seleção, Processamento, Resultado)
+  pages/                         -- rotas: "/" , "/lote/:loteId", "/lote/:loteId/revisao"
+```
+
+### O que já existe (24b) / o que falta (24c/24d)
+
+Fluxo principal completo e navegável: Seleção → Conferência → Processamento (progresso ao
+vivo por polling) → Resultado (contagens + baixar planilha + ir para Revisão). A tela de
+Revisão em si (foto da folha, explicação da Fase 18, correção manual) ainda é só um
+placeholder — Sub-fase 24c.

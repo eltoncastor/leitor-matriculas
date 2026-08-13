@@ -153,6 +153,16 @@ dados/*.xlsx
 # sistema exatamente ao estado anterior a Fase 20.
 dados/correcoes_humanas.jsonl
 
+# Ferramentas locais baixadas sob demanda (Sub-fase 24b: Node.js portátil
+# usado só para desenvolver o frontend web -- não é dependência do
+# projeto em si, nem deve ser versionado).
+.tools/
+
+# Frontend web (Fase 24b) -- artefatos de build/dependências do Node, nunca
+# versionados (mesma convenção de venv/ para Python).
+web/frontend/node_modules/
+web/frontend/dist/
+
 # Preferencia de tema (Sub-fase 22e): estado local de UI, nao dado de
 # negocio -- fica fora de dados/ de proposito (ver ui/preferencias.py).
 # Nao versionado pelo mesmo motivo que qualquer outro estado por maquina.
