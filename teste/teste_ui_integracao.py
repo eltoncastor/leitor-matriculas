@@ -348,6 +348,124 @@ with patch('leitor_matriculas.ui.app.messagebox.showerror') as m_err, patch('lei
                for r in app._registros_exportacao)
     print("OK: Fase 20 -- registrar a correcao nao alterou nenhuma decisao")
 
+    # ==================================================================
+    # Sub-fase 21b -- revisão como fluxo (lista de pendências, campo
+    # bloqueante em destaque, "Ver detalhes", contador de progresso) e a
+    # garantia de que `_revisao_confirmar` continua sendo o ÚNICO caminho
+    # para sair de REVISAO (mesma proteção travada desde a Fase 12).
+    # ==================================================================
+    pendentes_21b = app._indices_pendentes_revisao()
+    assert len(app.tabela_revisao_lista.get_children()) == len(pendentes_21b), (
+        "a lista de pendencias (area 1) tem que refletir _indices_pendentes_revisao "
+        "linha a linha -- e' a MESMA fonte de verdade que orienta a navegacao"
+    )
+    print("OK: Sub-fase 21b -- lista de pendencias reflete _indices_pendentes_revisao")
+
+    # O contador "N de M revisados": N tem que ser exatamente quantas
+    # correções desta sessão REALMENTE viraram CONFIRMADO (as `resolvidas`
+    # já apuradas na secao da Fase 20 acima) -- nunca "quantas vezes o
+    # botao foi clicado".
+    assert app._revisao_resolvidos_sessao == len(resolvidas), (
+        f"contador de progresso ({app._revisao_resolvidos_sessao}) nao bate com as "
+        f"correcoes que realmente confirmaram ({len(resolvidas)})"
+    )
+    texto_progresso = app._texto_progresso_revisao(pendentes_21b)
+    esperado_progresso = f"{len(resolvidas)} de {len(resolvidas) + len(pendentes_21b)} revisados"
+    assert texto_progresso == esperado_progresso, (texto_progresso, esperado_progresso)
+    print(f"OK: Sub-fase 21b -- contador de progresso: {texto_progresso!r}")
+
+    if pendentes_21b:
+        # Clicar numa linha da lista de pendências navega para ela --
+        # mesmo destino que os botões Anterior/Próximo alcançariam -- e
+        # NÃO toca em nenhum campo do formulário (é só navegação).
+        alvo_lista = min(1, len(pendentes_21b) - 1)
+        app.tabela_revisao_lista.selection_set(str(alvo_lista))
+        app._on_selecionar_pendencia_lista()
+        app.update()
+        assert app._revisao_posicao == alvo_lista, \
+            "selecionar uma linha na lista de pendencias nao navegou para ela"
+        _, registro_apos_clique = app._revisao_registro_atual()
+        for chave, var in app.revisao_vars.items():
+            assert var.get() == (registro_apos_clique.get(chave) or ""), (
+                f"clicar na lista de pendencias alterou o campo {chave!r} do formulario"
+            )
+        app._revisao_ir_para(0)
+        app.update()
+        print("OK: Sub-fase 21b -- clicar na lista de pendencias navega sem alterar o formulario")
+
+        # O campo bloqueante (e só ele) recebe destaque visual -- rótulo e
+        # caixa em estilo "danger".
+        explicacao_21b, _sinais_21b = app._explicacao_revisao_atual()
+        for chave, widget in app.revisao_widgets.items():
+            estilo = str(widget.cget("style"))
+            if chave in explicacao_21b.campos_bloqueantes:
+                assert "danger" in estilo, \
+                    f"campo bloqueante {chave!r} sem destaque visual (estilo={estilo!r})"
+            else:
+                assert "danger" not in estilo, \
+                    f"campo NAO bloqueante {chave!r} destacado por engano (estilo={estilo!r})"
+        print("OK: Sub-fase 21b -- só o(s) campo(s) bloqueante(s) recebem destaque visual")
+
+        # "Ver detalhes" começa fechado a cada registro (não pode dominar a
+        # tela) e alternar não toca em `revisao_vars` nem no status.
+        assert app._revisao_detalhes_expandido is False, \
+            "o painel de detalhes deveria comecar fechado ao carregar um registro"
+        antes_alternar = {k: v.get() for k, v in app.revisao_vars.items()}
+        app._alternar_detalhes_revisao()
+        assert app._revisao_detalhes_expandido is True
+        app._alternar_detalhes_revisao()
+        assert app._revisao_detalhes_expandido is False
+        depois_alternar = {k: v.get() for k, v in app.revisao_vars.items()}
+        assert antes_alternar == depois_alternar, \
+            "expandir/recolher 'Ver detalhes' alterou o formulario"
+        print("OK: Sub-fase 21b -- 'Ver detalhes' comeca fechado e alterna sem tocar no formulario")
+
+        # A foto da folha é carregada quando a miniatura está disponível
+        # (guardada por _worker_imagens/_worker_pdf durante o processamento).
+        _, registro_com_foto = app._revisao_registro_atual()
+        if registro_com_foto["pagina_origem"] in app._miniaturas_por_pagina:
+            assert getattr(app, "_imagem_pil_revisao", None) is not None, \
+                "havia miniatura para a pagina, mas a foto nao foi carregada na revisao"
+            print("OK: Sub-fase 21b -- foto da folha carregada quando disponivel")
+
+    # A proteção central (Fase 7/12): NENHUM lugar de ui/app.py pode
+    # escrever "CONFIRMADO" à mão em registro["status"]/em um dict de
+    # exportação -- toda atribuição tem que vir do RETORNO de
+    # `classificar_registro` (via a variável `resultado`/`status`, nunca
+    # um literal). Trava estrutural, não só comportamental: mesmo que
+    # alguém adicione um atalho nunca exercitado pelos cenários acima, o
+    # grep abaixo entra em pane.
+    caminho_app = os.path.join(os.path.dirname(__file__), "..", "src",
+                                "leitor_matriculas", "ui", "app.py")
+    with open(caminho_app, encoding="utf-8") as _fh:
+        codigo_app = _fh.read()
+    import re as _re
+    assert not _re.search(r'\["status"\]\s*=\s*"CONFIRMADO"', codigo_app), \
+        "ui/app.py escreve 'CONFIRMADO' na marra em registro['status'] -- atalho proibido"
+    assert not _re.search(r'"status"\s*:\s*"CONFIRMADO"', codigo_app), \
+        "ui/app.py escreve 'CONFIRMADO' na marra num dict literal -- atalho proibido"
+    # Os dois (e só os dois) caminhos legítimos que escrevem o status de um
+    # registro: a classificação automática (_adicionar_registros, monta o
+    # dict a partir da variável `status`) e `_revisao_confirmar`
+    # (reatribui a partir de `resultado.status`). Um terceiro caminho
+    # aparecendo aqui quebra esta trava de propósito, para ser notado.
+    reatribuicoes = _re.findall(r'registro\["status"\]\s*=(?!=)\s*([^\n]+)', codigo_app)
+    assert reatribuicoes == ["resultado.status"], (
+        f"esperava exatamente 1 reatribuicao de registro['status'] (em "
+        f"_revisao_confirmar, vinda de resultado.status); encontrado: {reatribuicoes}"
+    )
+    # Só os dicts que MONTAM um registro (têm "pagina_origem" ao lado) --
+    # não os de layout (CABECALHOS_TABELA/LARGURAS_TABELA, que também têm
+    # a chave "status", mas para largura/rótulo de coluna).
+    dicts_de_registro = _re.findall(r'"pagina_origem":[^\n]*"status":\s*(\w+|"ERRO")', codigo_app)
+    assert sorted(dicts_de_registro) == sorted(["status", '"ERRO"']), (
+        f"esperava exatamente os 2 dicts de registro conhecidos (classificacao "
+        f"automatica com 'status': status, e a linha ERRO de falha de pagina); "
+        f"encontrado: {dicts_de_registro}"
+    )
+    print("OK: Sub-fase 21b -- _revisao_confirmar continua o UNICO caminho para "
+          "sair de REVISAO (nenhum atalho grava 'CONFIRMADO' na marra)")
+
     shutil.rmtree(tmp, ignore_errors=True)
     app.destroy()
 

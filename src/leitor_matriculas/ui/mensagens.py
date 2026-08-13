@@ -152,6 +152,20 @@ VAZIO_TABELA = (
 )
 VAZIO_TABELA_FILTRADA = "Nenhum registro corresponde ao filtro “{filtro}”."
 VAZIO_AVISOS = "Nenhum aviso — nada precisa ser conferido no papel até agora."
+# Sub-fase 21b: os dois motivos pelos quais a lista de pendências da
+# Revisão pode estar vazia são notícias BEM diferentes -- "ainda não
+# processei nada" pede uma ação (ir para o Início); "processei e não
+# sobrou pendência" é o resultado que se quer. Confundir os dois deixaria
+# a boa notícia parecendo um problema.
+VAZIO_REVISAO_SEM_PROCESSAMENTO = (
+    "Nenhum registro para revisar ainda.\n\n"
+    "Vá para a aba Início e processe as folhas — o que precisar de "
+    "conferência aparece aqui."
+)
+VAZIO_REVISAO_TUDO_CONFIRMADO = (
+    "Nada pendente de revisão. 🎉\n\n"
+    "Todos os registros processados foram confirmados."
+)
 
 
 def resumo_do_resultado(total, confirmados, revisao, erros) -> str:

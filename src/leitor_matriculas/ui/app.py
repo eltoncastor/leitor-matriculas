@@ -136,6 +136,20 @@ COLUNAS_A_ESQUERDA = {"nome", "setor", "cargo", "observacao"}
 
 FILTROS_TABELA = ("Todos", "Confirmados", "Em revisão", "Com erro")
 
+# Sub-fase 21b (aba Revisão): uma cor de TEXTO (não de fundo -- "sem
+# exagerar em cores", pedido explícito do escopo) por campo, usada tanto na
+# lista de pendências quanto no rótulo do campo em destaque no formulário.
+# É só apresentação -- os nomes das chaves são os mesmos de
+# `explicacao_revisao.ROTULOS`.
+CORES_TIPO_PENDENCIA = {
+    "data": "#5c6bc0",
+    "hora": "#00897b",
+    "matricula": "#8e24aa",
+    "motivo": "#ef6c00",
+    "gestor": "#c2185b",
+}
+COR_TIPO_PENDENCIA_PADRAO = "#495057"
+
 # Maior dimensão guardada da foto de cada página para a aba de Revisão.
 # A foto é guardada JÁ COMPRIMIDA em JPEG (bytes), não como matriz: um
 # lote real de ~50 folhas em matriz numpy passaria de 1 GB de RAM, enquanto
@@ -273,6 +287,19 @@ class App(tb.Window):
         self._revisao_posicao = 0    # posição atual dentro de _revisao_indices
         self._revisao_zoom = 1.0
         self._foto_revisao = None    # referência viva do PhotoImage (senão o Tk descarta)
+        # Sub-fase 21b: quantas correções foram CONFIRMADAS nesta sessão de
+        # revisão (não é o mesmo que "quantas ainda faltam" -- essa conta já
+        # existe em `_indices_pendentes_revisao`). É o numerador do contador
+        # "N de M revisados"; o denominador é `resolvidos + pendentes_atuais`,
+        # recalculado ao vivo (nunca guardado como total fixo), para que
+        # processar folhas novas no meio de uma revisão aumente o total sem
+        # exigir nenhum código extra. Puramente informativo -- não participa
+        # de nenhuma decisão e é zerado junto com "Limpar resultados".
+        self._revisao_resolvidos_sessao = 0
+        # Se o painel de detalhes (Fase 18, "Por que está em revisão") está
+        # expandido. Fecha por padrão a cada registro novo, para não dominar
+        # a tela (pedido explícito do escopo da 21b).
+        self._revisao_detalhes_expandido = False
 
         self._montar_layout()
         # Sincroniza a tabela já vazia para que o estado vazio (Fase 21a)
@@ -797,16 +824,76 @@ class App(tb.Window):
 
     # ------------------------------------------------------------------
     def _montar_aba_revisao(self):
+        """
+        Sub-fase 21b: a revisão passou a ter TRÊS áreas lado a lado, na
+        ordem em que o operador raciocina sobre uma linha pendente --
+        "o que falta revisar" (lista), "o que a folha realmente diz" (a
+        foto), "o que eu decido e como confirmo" (formulário, com o campo
+        bloqueante em destaque). Antes eram só foto + formulário: não
+        havia nenhuma visão do conjunto, só do item atual -- então navegar
+        entre pendências era só "próximo", nunca "vou direto na linha 9
+        porque é matrícula, que eu sei resolver rápido".
+
+        Nada disto substitui `_revisao_confirmar` (Fase 7/12): esta função
+        só monta widgets, nenhum deles decide nada.
+        """
         aba = ttk.Frame(self.abas, padding=10)
         self.abas.add(aba, text="Revisão")
         self._aba_revisao = aba
 
+        # Estado vazio (mesmo padrão da aba Registros -- Fase 21a): a
+        # revisão pode estar vazia por dois motivos BEM diferentes ("ainda
+        # não processei nada" x "processei e não sobrou pendência", que é
+        # a boa notícia), então o texto muda conforme o caso em
+        # `_atualizar_estado_vazio_revisao`.
+        self.lbl_revisao_vazio = ttk.Label(
+            aba, text="", bootstyle="secondary", anchor="center", justify="center",
+        )
+
         painel = ttk.PanedWindow(aba, orient="horizontal")
+        self._moldura_revisao_painel = painel
         painel.pack(side="top", fill="both", expand=True)
 
-        # ---- esquerda: a foto da folha --------------------------------
+        # ---- área 1: lista de pendências -------------------------------
+        moldura_lista = ttk.Labelframe(painel, text="Pendências", padding=6)
+        painel.add(moldura_lista, weight=2)
+
+        self.lbl_revisao_progresso = ttk.Label(
+            moldura_lista, text="", bootstyle="secondary", justify="left", wraplength=210,
+        )
+        self.lbl_revisao_progresso.pack(side="top", fill="x", pady=(0, 6))
+
+        moldura_lista_tabela = ttk.Frame(moldura_lista)
+        moldura_lista_tabela.pack(side="top", fill="both", expand=True)
+        self.tabela_revisao_lista = ttk.Treeview(
+            moldura_lista_tabela, columns=("pagina", "matricula", "pendencia"),
+            show="headings", selectmode="browse",
+        )
+        for coluna, titulo, largura in [
+            ("pagina", "Pág.", 40), ("matricula", "Matrícula", 70), ("pendencia", "Pendência", 100),
+        ]:
+            self.tabela_revisao_lista.heading(coluna, text=titulo)
+            self.tabela_revisao_lista.column(coluna, width=largura, anchor="w", stretch=(coluna == "pendencia"))
+        # Cor de TEXTO por tipo de campo -- não de fundo, para não "exagerar
+        # em cores" (pedido explícito do escopo). É o mesmo vocabulário de
+        # `explicacao_revisao.ROTULOS`.
+        for campo, cor in CORES_TIPO_PENDENCIA.items():
+            self.tabela_revisao_lista.tag_configure(campo, foreground=cor)
+        self.tabela_revisao_lista.tag_configure("outro", foreground=COR_TIPO_PENDENCIA_PADRAO)
+        vsb_lista = ttk.Scrollbar(moldura_lista_tabela, orient="vertical", command=self.tabela_revisao_lista.yview)
+        self.tabela_revisao_lista.configure(yscrollcommand=vsb_lista.set)
+        self.tabela_revisao_lista.grid(row=0, column=0, sticky="nsew")
+        vsb_lista.grid(row=0, column=1, sticky="ns")
+        moldura_lista_tabela.rowconfigure(0, weight=1)
+        moldura_lista_tabela.columnconfigure(0, weight=1)
+        # Clicar numa pendência da lista vai direto para ela -- a mesma
+        # ação que "Próximo"/"Anterior" fazem, só que por escolha, não em
+        # sequência.
+        self.tabela_revisao_lista.bind("<<TreeviewSelect>>", self._on_selecionar_pendencia_lista)
+
+        # ---- área 2: a foto da folha ------------------------------------
         moldura_foto = ttk.Labelframe(painel, text="Folha digitalizada", padding=8)
-        painel.add(moldura_foto, weight=3)
+        painel.add(moldura_foto, weight=4)
 
         controles_foto = ttk.Frame(moldura_foto)
         controles_foto.pack(side="top", fill="x", pady=(0, 6))
@@ -831,24 +918,36 @@ class App(tb.Window):
         moldura_canvas.rowconfigure(0, weight=1)
         moldura_canvas.columnconfigure(0, weight=1)
 
-        # ---- direita: o formulário ------------------------------------
+        # ---- área 3: o que decidir e como confirmar ----------------------
         moldura_form = ttk.Frame(painel, padding=(12, 0, 0, 0))
-        painel.add(moldura_form, weight=2)
+        painel.add(moldura_form, weight=3)
 
         topo = ttk.Frame(moldura_form)
         topo.pack(side="top", fill="x")
         self.lbl_revisao_posicao = ttk.Label(topo, text="", font=("", 11, "bold"))
         self.lbl_revisao_posicao.pack(side="left")
 
-        self.lbl_revisao_motivo = ttk.Label(
-            moldura_form, text="", bootstyle="warning", wraplength=430, justify="left",
+        # Resumo do bloqueio: SEMPRE visível, uma frase curta ("A dúvida
+        # está em: Data"), para o operador nunca precisar abrir nada só
+        # para saber o que está em jogo nesta linha.
+        self.lbl_revisao_resumo = ttk.Label(
+            moldura_form, text="", bootstyle="warning", wraplength=430,
+            justify="left", font=("", 10, "bold"),
         )
-        self.lbl_revisao_motivo.pack(side="top", fill="x", pady=(6, 10))
+        self.lbl_revisao_resumo.pack(side="top", fill="x", pady=(8, 2))
 
-        # Fase 18: a explicação da dúvida, lida do dossiê da Fase 17. Entra
-        # ACIMA do formulário porque é o que o operador precisa ler ANTES de
-        # digitar. O rótulo de observação acima continua existindo (é o texto
-        # que a validação sempre produziu); aqui vem a cadeia detalhada.
+        # "Por que preciso revisar? [Ver detalhes]" -- Fase 18 continua
+        # gerando a cadeia inteira de evidência (o que o OCR leu, a
+        # normalização, o que a base respondeu); aqui ela só deixou de
+        # aparecer sempre aberta, para não dominar a tela. Nunca expõe
+        # nome de estrutura interna (DossieRegistro/Evidencia/limiar) --
+        # `explicacao_revisao` já entrega só linguagem de operador.
+        self.btn_revisao_detalhes = ttk.Button(
+            moldura_form, text="Ver detalhes ▸", bootstyle="link",
+            command=self._alternar_detalhes_revisao, padding=0,
+        )
+        self.btn_revisao_detalhes.pack(side="top", anchor="w", pady=(0, 4))
+
         self.moldura_revisao_explicacao = ttk.Labelframe(
             moldura_form, text="Por que está em revisão", padding=10,
         )
@@ -856,23 +955,20 @@ class App(tb.Window):
             self.moldura_revisao_explicacao, text="", wraplength=420, justify="left",
         )
         self.lbl_revisao_explicacao.pack(side="top", fill="x", anchor="w")
-        # Sinais de contexto (Fase 16, medidos e aprovados só para EXIBIÇÃO).
-        # Rótulo próprio e estilo próprio: contexto não pode ficar
-        # indistinguível de dado confirmado.
-        self.lbl_revisao_contexto = ttk.Label(
-            self.moldura_revisao_explicacao, text="", bootstyle="info",
-            wraplength=420, justify="left",
-        )
+        # Os sinais de contexto (Fase 16/18 -- gestores do lote, ordem
+        # cronológica) passaram a aparecer COLADOS ao campo a que se
+        # referem (ver `_destacar_campos_revisao`), não mais soltos aqui:
+        # é literalmente "a sugestão que o sistema já produziu, perto do
+        # campo bloqueante", que é o pedido da 21b.
 
         campos = ttk.Labelframe(moldura_form, text="Campos lidos da folha", padding=12)
         campos.pack(side="top", fill="x")
-        # Guardado porque a moldura da explicação (Fase 18) é empacotada
-        # com `before=` este frame -- ela aparece e some conforme houver ou
-        # não o que explicar, sem reordenar o resto do formulário.
         self.moldura_revisao_campos = campos
 
         self.revisao_vars = {}
         self.revisao_widgets = {}
+        self.revisao_rotulos = {}
+        self.revisao_dicas = {}
         # MOTIVO e RESPONSÁVEL viram lista fechada (Combobox) porque o valor
         # válido só pode ser um dos cadastrados -- digitar à mão aqui só
         # criaria um valor que a validação vai recusar em seguida. Ficam
@@ -886,7 +982,9 @@ class App(tb.Window):
             ("gestor", "Responsável", "combo", self._data_manager.listar_gestores),
         ]
         for i, (chave, rotulo, tipo, fonte_valores) in enumerate(linhas):
-            ttk.Label(campos, text=rotulo).grid(row=i, column=0, sticky="w", pady=4, padx=(0, 10))
+            linha_campo = 2 * i
+            rotulo_widget = ttk.Label(campos, text=rotulo)
+            rotulo_widget.grid(row=linha_campo, column=0, sticky="w", pady=(4, 0), padx=(0, 10))
             var = tk.StringVar()
             if tipo == "combo":
                 try:
@@ -896,9 +994,20 @@ class App(tb.Window):
                 widget = ttk.Combobox(campos, textvariable=var, values=valores, width=32)
             else:
                 widget = ttk.Entry(campos, textvariable=var, width=34)
-            widget.grid(row=i, column=1, sticky="ew", pady=4)
+            widget.grid(row=linha_campo, column=1, sticky="ew", pady=(4, 0))
             self.revisao_vars[chave] = var
             self.revisao_widgets[chave] = widget
+            self.revisao_rotulos[chave] = rotulo_widget
+            # Linha da "sugestão que o sistema já produziu" para este campo
+            # (Fase 16/18: só contexto medido -- nunca um candidato novo
+            # buscado aqui). Some quando não há nada a mostrar; nunca
+            # pré-seleciona nem escreve em `revisao_vars`.
+            dica_widget = ttk.Label(
+                campos, text="", bootstyle="info", wraplength=380, justify="left",
+            )
+            dica_widget.grid(row=linha_campo + 1, column=0, columnspan=2, sticky="w", padx=(0, 0), pady=(0, 2))
+            dica_widget.grid_remove()
+            self.revisao_dicas[chave] = dica_widget
         campos.columnconfigure(1, weight=1)
 
         ttk.Label(
@@ -906,7 +1015,7 @@ class App(tb.Window):
             text="Data em DD/MM/AA e hora em HH:MM. A hora é opcional;\n"
                  "a matrícula só pode conter dígitos.",
             bootstyle="secondary", justify="left",
-        ).grid(row=len(linhas), column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=2 * len(linhas), column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         derivados = ttk.Labelframe(moldura_form, text="Obtido da base pela matrícula", padding=12)
         derivados.pack(side="top", fill="x", pady=(10, 0))
@@ -930,15 +1039,16 @@ class App(tb.Window):
             command=lambda: self._revisao_navegar(1), width=12,
         )
         self.btn_revisao_proximo.pack(side="left", padx=(6, 0))
+        # "Confirmar e próximo": o nome descreve o que acontece de fato --
+        # `_revisao_confirmar` (Fase 7/12, intocada) já avança para a
+        # próxima pendência sozinha quando a linha sai de REVISAO, porque a
+        # lista de pendentes encolhe. Continua sendo o ÚNICO caminho para
+        # sair de REVISAO.
         self.btn_revisao_confirmar = ttk.Button(
-            acoes, text="Confirmar correção", bootstyle="success",
+            acoes, text="Confirmar e próximo", bootstyle="success",
             command=self._revisao_confirmar, width=20,
         )
         self.btn_revisao_confirmar.pack(side="right")
-
-        self.lbl_revisao_vazio = ttk.Label(
-            aba, text="", bootstyle="secondary", anchor="center", justify="center",
-        )
 
     # ------------------------------------------------------------------
     def _montar_aba_avisos(self):
@@ -1874,6 +1984,11 @@ class App(tb.Window):
         self._miniaturas_por_pagina = {}
         self._revisao_indices = []
         self._revisao_posicao = 0
+        # Sub-fase 21b: o contador "N de M revisados" é da SESSÃO de
+        # revisão em torno do lote atual -- limpo junto, senão a próxima
+        # leva começaria contando como se já tivesse revisado algo.
+        self._revisao_resolvidos_sessao = 0
+        self._revisao_detalhes_expandido = False
         # O contexto do lote é evidência das folhas que estavam na tabela:
         # limpar os resultados tem de limpá-lo junto, senão o ano de um lote
         # completaria datas do lote seguinte.
@@ -2055,8 +2170,19 @@ class App(tb.Window):
         return indice, self._registros_exportacao[indice]
 
     def _atualizar_painel_revisao(self):
-        """Recarrega o formulário e a foto a partir do registro atual."""
+        """Recarrega a lista de pendências, o formulário e a foto a partir
+        do registro atual. Ponto único que sincroniza as três áreas da
+        aba -- mesmo espírito de `_sincronizar_tabela_principal` (Fase 10):
+        com mais de um lugar escrevendo nos mesmos widgets, as três áreas
+        acabam divergindo entre si."""
         pendentes = self._indices_pendentes_revisao()
+        self._atualizar_lista_revisao_pendencias(pendentes)
+        self._atualizar_texto_progresso(pendentes)
+
+        if not self._atualizar_estado_vazio_revisao(pendentes):
+            self._atualizar_rotulos_abas()
+            return
+
         habilitado = "normal" if pendentes else "disabled"
         for widget in list(self.revisao_widgets.values()) + [
             self.btn_revisao_anterior, self.btn_revisao_proximo, self.btn_revisao_confirmar
@@ -2066,27 +2192,15 @@ class App(tb.Window):
             except Exception:
                 pass
 
-        if not pendentes:
-            for var in self.revisao_vars.values():
-                var.set("")
-            self.lbl_revisao_posicao.config(text="Nenhum registro pendente de revisão")
-            self.lbl_revisao_motivo.config(text="")
-            self._mostrar_explicacao_revisao(None, None)
-            self.lbl_revisao_nome.config(text="—")
-            self.lbl_revisao_setor.config(text="")
-            self.lbl_revisao_resultado.config(text="")
-            self.lbl_pagina_foto.config(text="")
-            self.canvas_foto.delete("all")
-            self._foto_revisao = None
-            self._atualizar_rotulos_abas()
-            return
+        # Fecha o painel de detalhes a cada registro novo -- ver o campo
+        # `_revisao_detalhes_expandido` no __init__.
+        self._revisao_detalhes_expandido = False
 
         _indice, registro = self._revisao_registro_atual()
         posicao = self._revisao_posicao + 1
         self.lbl_revisao_posicao.config(
             text=f"Pendente {posicao} de {len(pendentes)}  ·  página {registro['pagina_origem']}"
         )
-        self.lbl_revisao_motivo.config(text=registro.get("observacao") or "")
         # Fase 18: a explicação é montada ANTES de preencher os campos, e é
         # só leitura -- `revisao_vars` continua recebendo exclusivamente o
         # valor JÁ apurado do registro. Nenhuma sugestão entra aqui: um
@@ -2099,6 +2213,116 @@ class App(tb.Window):
         self.lbl_revisao_resultado.config(text="")
         self._mostrar_foto_pagina(registro["pagina_origem"])
         self._atualizar_rotulos_abas()
+
+    def _atualizar_estado_vazio_revisao(self, pendentes):
+        """
+        Troca o painel de três áreas pelo texto de estado vazio quando não
+        há pendência nenhuma -- distinguindo "ainda não processei nada" de
+        "processei e não sobrou pendência" (a boa notícia), mesmo padrão
+        de `_atualizar_estado_vazio_tabela` (Fase 21a). Devolve True
+        quando o painel normal deve continuar sendo preenchido.
+        """
+        try:
+            if pendentes:
+                self.lbl_revisao_vazio.pack_forget()
+                if not self._moldura_revisao_painel.winfo_ismapped():
+                    self._moldura_revisao_painel.pack(side="top", fill="both", expand=True)
+                return True
+            self._moldura_revisao_painel.pack_forget()
+            texto = (
+                mensagens.VAZIO_REVISAO_TUDO_CONFIRMADO if self._registros_exportacao
+                else mensagens.VAZIO_REVISAO_SEM_PROCESSAMENTO
+            )
+            self.lbl_revisao_vazio.config(text=texto)
+            self.lbl_revisao_vazio.pack(side="top", fill="both", expand=True, pady=(60, 0))
+        except Exception:
+            logging.exception("Falha ao alternar o estado vazio da revisão (apenas cosmético)")
+        return False
+
+    def _texto_progresso_revisao(self, pendentes):
+        """
+        'N de M revisados': N é quanto já foi CONFIRMADO nesta sessão de
+        revisão (`_revisao_resolvidos_sessao`, só incrementado por
+        `_revisao_confirmar`); M é `N + pendentes agora`, recalculado ao
+        vivo -- não um total fixo -- para que processar folhas novas no
+        meio de uma revisão aumente M sem exigir nenhum estado extra.
+        Puramente informativo.
+        """
+        resolvidos = self._revisao_resolvidos_sessao
+        total = resolvidos + len(pendentes)
+        if total == 0:
+            return ""
+        return f"{resolvidos} de {total} revisados"
+
+    def _atualizar_texto_progresso(self, pendentes):
+        texto = self._texto_progresso_revisao(pendentes)
+        sufixo = f"\n{len(pendentes)} pendente(s) agora" if pendentes else ""
+        self.lbl_revisao_progresso.config(text=(texto + sufixo) if texto else "")
+
+    def _atualizar_lista_revisao_pendencias(self, pendentes=None):
+        """Reconstrói a lista de pendências (área 1) a partir de
+        `_registros_exportacao` -- a mesma fonte de verdade da tabela
+        principal. Cada linha mostra a página, a matrícula (quando lida) e
+        o(s) campo(s) que bloqueiam, coloridos por tipo."""
+        if pendentes is None:
+            pendentes = self._indices_pendentes_revisao()
+        tabela = self.tabela_revisao_lista
+        tabela.delete(*tabela.get_children())
+        for posicao, indice in enumerate(pendentes):
+            registro = self._registros_exportacao[indice]
+            try:
+                explicacao = explicacao_revisao.explicar(
+                    registro.get("evidencias"), registro.get("observacao") or ""
+                )
+                campos = explicacao.campos_bloqueantes
+            except Exception:
+                campos = []
+            if campos:
+                pendencia = ", ".join(explicacao_revisao.ROTULOS.get(c, c) for c in campos)
+                tag = campos[0]
+            else:
+                pendencia = "revisão"
+                tag = "outro"
+            matricula = registro.get("matricula") or "—"
+            tabela.insert(
+                "", "end", iid=str(posicao),
+                values=(registro.get("pagina_origem"), matricula, pendencia),
+                tags=(tag,),
+            )
+        iid_atual = str(self._revisao_posicao)
+        if tabela.exists(iid_atual):
+            tabela.selection_set(iid_atual)
+            tabela.see(iid_atual)
+
+    def _on_selecionar_pendencia_lista(self, _evento=None):
+        """Clicar numa linha da lista de pendências navega direto para
+        ela -- mesma ação de `_revisao_ir_para`, só que por escolha do
+        operador em vez de sequência."""
+        selecao = self.tabela_revisao_lista.selection()
+        if not selecao:
+            return
+        try:
+            posicao = int(selecao[0])
+        except (TypeError, ValueError):
+            return
+        if posicao != self._revisao_posicao:
+            self._revisao_ir_para(posicao)
+
+    def _alternar_detalhes_revisao(self):
+        """'Ver detalhes' -- só mostra/esconde o painel com a cadeia
+        completa de evidência (Fase 17/18); não recalcula nada."""
+        self._revisao_detalhes_expandido = not self._revisao_detalhes_expandido
+        self._atualizar_visibilidade_detalhes_revisao()
+
+    def _atualizar_visibilidade_detalhes_revisao(self):
+        if self._revisao_detalhes_expandido:
+            self.btn_revisao_detalhes.config(text="Ocultar detalhes ▾")
+            self.moldura_revisao_explicacao.pack(
+                side="top", fill="x", pady=(0, 10), before=self.moldura_revisao_campos
+            )
+        else:
+            self.btn_revisao_detalhes.config(text="Ver detalhes ▸")
+            self.moldura_revisao_explicacao.pack_forget()
 
     def _explicacao_revisao_atual(self):
         """
@@ -2118,13 +2342,17 @@ class App(tb.Window):
         return explicacao, sinais
 
     def _mostrar_explicacao_revisao(self, indice, registro):
-        """Escreve a explicação e os sinais de contexto na tela. Só desenha
-        -- não toca em `revisao_vars` nem em nada do registro."""
+        """Escreve o resumo do bloqueio, o painel de detalhes (Fase 18), o
+        destaque do campo bloqueante e as sugestões de contexto na tela.
+        Só desenha -- não toca em `revisao_vars` nem em nada do registro,
+        e não decide nada: os campos que bloqueiam vêm inteiramente de
+        `explicacao_revisao.explicar`, que só lê o dossiê já gravado."""
         if registro is None:
+            self.lbl_revisao_resumo.config(text="")
             self.lbl_revisao_explicacao.config(text="")
-            self.lbl_revisao_contexto.config(text="")
+            self.btn_revisao_detalhes.pack_forget()
             self.moldura_revisao_explicacao.pack_forget()
-            self.lbl_revisao_contexto.pack_forget()
+            self._destacar_campos_revisao([], [])
             return
 
         try:
@@ -2135,30 +2363,58 @@ class App(tb.Window):
             logging.exception("Falha ao montar a explicação da revisão")
             explicacao, sinais = explicacao_revisao.ExplicacaoRevisao(), []
 
-        texto = explicacao.como_texto()
-        self.lbl_revisao_explicacao.config(text=texto)
+        # Resumo curto, SEMPRE visível (pedido do escopo: o operador nunca
+        # deve precisar expandir nada só para saber o que está em jogo).
+        # Sem dossiê (sessão anterior à Fase 17), cai na observação bruta
+        # que a validação já produzia -- comportamento antigo preservado.
+        resumo = explicacao.titulo if not explicacao.vazia else (registro.get("observacao") or "")
+        self.lbl_revisao_resumo.config(text=resumo)
 
-        # Contexto vem com prefixo próprio e estilo próprio para nunca se
-        # confundir com o dado confirmado do registro.
-        if sinais:
-            partes = []
-            for sinal in sinais:
-                parte = f"ⓘ {sinal.motivo}"
-                if sinal.valor_observado:
-                    parte += f"\n    {sinal.valor_observado}"
-                partes.append(parte)
-            self.lbl_revisao_contexto.config(text="\n".join(partes))
-            self.lbl_revisao_contexto.pack(side="top", fill="x", anchor="w", pady=(8, 0))
-        else:
-            self.lbl_revisao_contexto.config(text="")
-            self.lbl_revisao_contexto.pack_forget()
+        # O corpo detalhado (a cadeia OCR -> normalização -> base -> regra)
+        # só aparece atrás do botão "Ver detalhes". Os sinais de contexto
+        # (Fase 16/18) não entram aqui -- vão colados ao campo a que se
+        # referem, via `_destacar_campos_revisao` logo abaixo.
+        self.lbl_revisao_explicacao.config(text="\n".join(explicacao.detalhes))
 
-        if texto or sinais:
-            self.moldura_revisao_explicacao.pack(
-                side="top", fill="x", pady=(0, 10), before=self.moldura_revisao_campos
-            )
+        if explicacao.detalhes:
+            self.btn_revisao_detalhes.pack(side="top", anchor="w", pady=(0, 4))
+            self._atualizar_visibilidade_detalhes_revisao()
         else:
+            self.btn_revisao_detalhes.pack_forget()
             self.moldura_revisao_explicacao.pack_forget()
+
+        self._destacar_campos_revisao(explicacao.campos_bloqueantes, sinais)
+
+    def _destacar_campos_revisao(self, campos_bloqueantes, sinais):
+        """
+        Dá destaque visual ao(s) campo(s) que bloqueiam a linha (rótulo e
+        caixa em vermelho) e mostra, colada ao campo, a sugestão de
+        contexto que o sistema já tinha produzido -- nunca um candidato
+        novo calculado aqui, nunca pré-selecionado no campo (`revisao_vars`
+        não é tocado por este método).
+        """
+        dicas_por_campo = {}
+        for sinal in sinais:
+            texto = f"ⓘ {sinal.motivo}"
+            if sinal.valor_observado:
+                texto += f"\n    {sinal.valor_observado}"
+            dicas_por_campo.setdefault(sinal.campo, []).append(texto)
+
+        for chave in self.revisao_rotulos:
+            bloqueado = chave in campos_bloqueantes
+            try:
+                self.revisao_rotulos[chave].config(bootstyle=("danger" if bloqueado else "default"))
+                self.revisao_widgets[chave].config(bootstyle=("danger" if bloqueado else "default"))
+            except Exception:
+                pass
+            dica_widget = self.revisao_dicas[chave]
+            texto_dica = "\n".join(dicas_por_campo.get(chave, []))
+            if texto_dica:
+                dica_widget.config(text=texto_dica)
+                dica_widget.grid()
+            else:
+                dica_widget.config(text="")
+                dica_widget.grid_remove()
 
     def _atualizar_derivados_revisao(self, registro):
         nome = registro.get("nome") or "—"
@@ -2347,6 +2603,10 @@ class App(tb.Window):
         if resultado.status == "CONFIRMADO" and status_anterior != "CONFIRMADO":
             self._contador_revisao -= 1
             self._contador_confirmados += 1
+            # Sub-fase 21b: numerador do contador "N de M revisados" (área
+            # de pendências). Só cresce aqui -- é a mesma condição que já
+            # decide se a linha realmente saiu de REVISAO.
+            self._revisao_resolvidos_sessao += 1
 
         # Fase 20 (H5): grava a correção no histórico -- DEPOIS que a
         # decisão já foi tomada, e sem participar dela. Nada acima desta
