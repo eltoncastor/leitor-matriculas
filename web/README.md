@@ -21,11 +21,19 @@ python web\backend\main.py
 python -m uvicorn web.backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Documentação interativa (Swagger): http://127.0.0.1:8000/docs
+Documentação interativa (Swagger): http://127.0.0.1:8000/docs (uso local) ou
+http://<IP-tailscale-desta-máquina>:8000/docs (acesso remoto — ver seção
+"Acesso remoto (Tailscale)" abaixo).
 
-**Escopo desta fase**: sem autenticação, sem multiusuário real — a API
-nunca deve ser exposta além de `localhost`/rede local. Isso é decisão de
-projeto (ver CLAUDE.md), não uma limitação a corrigir aqui.
+**Escopo**: sem autenticação, sem multiusuário real — decisão de projeto
+inalterada (ver CLAUDE.md). **Ajuste pontual pós-Fase 24**: o servidor
+passou a escutar em `0.0.0.0` (todas as interfaces de rede) em vez de só
+`127.0.0.1`, para permitir acesso remoto via Tailscale — não é mais "nunca
+exposta além de localhost". O que continua protegendo isto de virar um
+servidor público é a ausência de qualquer port-forwarding no roteador e o
+uso do Tailscale (VPN privada, só os dispositivos da própria conta) para o
+acesso de fora da rede local — nunca a internet aberta. Ver
+`saida/ajuste_acesso_tailscale.md` para o detalhe completo.
 
 ### Testes do backend
 
@@ -65,6 +73,37 @@ npm run test       # Vitest -- rápido, roda a cada alteração
 npm run build       # build de produção em web\frontend\dist
 npm run lint         # oxlint
 ```
+
+## Acesso remoto (Tailscale)
+
+Ajuste pontual pós-Fase 24 — continua sendo uso de UMA pessoa só (o dono do lote), agora
+a partir de qualquer dispositivo dela, não só a máquina onde os servidores rodam. Não é
+o início do suporte a múltiplos usuários simultâneos, e não há autenticação nova.
+
+1. **Instalar o Tailscale** nos dois dispositivos (a máquina que roda `uvicorn`/`vite dev`
+   e o dispositivo remoto, ex. um notebook do trabalho) e entrar com a MESMA conta nos
+   dois — configuração de conta/app do Tailscale, fora do escopo deste repositório.
+2. **Descobrir o IP Tailscale** da máquina que roda os servidores: `tailscale ip -4` no
+   terminal dela, ou o próprio app do Tailscale mostra (sempre começa com `100.`).
+3. **Rodar os dois servidores normalmente**, na máquina de origem — nada aqui virou um
+   serviço permanente/instalado; os dois processos continuam precisando estar rodando
+   enquanto o acesso remoto é usado, exatamente como no uso local:
+   ```powershell
+   python web\backend\main.py         # agora escuta em 0.0.0.0:8000
+   cd web\frontend; npm run dev        # agora escuta em 0.0.0.0:5173 (host: true)
+   ```
+4. **No dispositivo remoto**, com o Tailscale conectado, abrir no navegador:
+   `http://<IP-tailscale-da-máquina-de-origem>:5173` — o `vite.config.js` já resolve o
+   proxy de `/api/*` para o backend na MESMA máquina de origem (`127.0.0.1:8000` do
+   ponto de vista dela), então não é preciso apontar o frontend para o backend
+   manualmente.
+
+**O que protege isto de virar um servidor público**: nenhum port-forwarding é feito no
+roteador (em nenhuma das redes onde a máquina de origem estiver) — sem isso, a internet
+aberta não alcança as portas 8000/5173 desta máquina. O acesso de fora da rede local é
+sempre através da tailnet privada (só os dispositivos da própria conta), nunca da
+internet pública. Ver o docstring de `web/backend/main.py` e
+`saida/ajuste_acesso_tailscale.md` para o detalhe completo da mudança de decisão.
 
 ### Estrutura
 

@@ -15,6 +15,17 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
+    // Ajuste pontual pós-Fase 24 (acesso remoto via Tailscale -- ver
+    // CLAUDE.md e saida/ajuste_acesso_tailscale.md): por padrão o dev
+    // server do Vite só aceita conexões vindas da própria máquina
+    // (bind em 127.0.0.1). `host: true` faz o Vite escutar em todas as
+    // interfaces de rede (equivalente a 0.0.0.0), então um outro
+    // dispositivo na mesma tailnet (ou na mesma rede local) consegue
+    // abrir http://<IP-desta-máquina>:5173. O proxy abaixo continua
+    // apontando para 127.0.0.1:8000 -- o backend roda na MESMA máquina
+    // que o Vite, então o proxy nunca precisa sair dela; é só a conexão
+    // do NAVEGADOR remoto até este dev server que passa a ser aceita.
+    host: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8000',
