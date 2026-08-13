@@ -1,15 +1,17 @@
 """
-explicacao_revisao.py
+validacao/explicacao_revisao.py
 
 Traduz o que o MOTOR DE EVIDÊNCIAS (Fase 17) registrou para o texto que o
-operador lê na aba Revisão: qual campo levou o registro a REVISAO, o que o
-OCR tinha lido, o que foi normalizado e o que a base respondeu.
+operador lê na tela de Revisão: qual campo levou o registro a REVISAO, o
+que o OCR tinha lido, o que foi normalizado e o que a base respondeu.
 
 FRONTEIRA DESTA CAMADA — ela só LÊ. Não valida, não corrige, não decide, e
 não escreve em campo nenhum do formulário. O único caminho para sair de
-REVISAO continua sendo `_revisao_confirmar`, que reconstrói o `Registro` e
-reroda `classificar_registro` (proteção da Fase 12). Nada aqui encurta
-esse caminho.
+REVISAO continua sendo `confirmar_revisao_manual` (`validacao/
+confirmacao.py`, chamado tanto por `_revisao_confirmar` no Tkinter quanto
+pelo backend web desde a Fase 24a), que reconstrói o `Registro` e reroda
+`classificar_registro` (proteção da Fase 12). Nada aqui encurta esse
+caminho.
 
 POR QUE UM MÓDULO SEPARADO, e não texto solto dentro de `ui/app.py`: aqui
 não se importa Tkinter. A tradução é função pura de dados puros (a lista
@@ -17,6 +19,17 @@ de dicts que `DossieRegistro.como_dicionarios()` produz), então dá para
 testá-la sem abrir janela — que é a mesma razão pela qual a Fase 10 criou
 o contrato programático da revisão em vez de deixar o teste caçar widgets
 na árvore do Tk.
+
+Fase 24c (Web MVP): morava em `ui/explicacao_revisao.py` desde a Fase 18
+— fazia sentido enquanto só existia o Tkinter. Mudou para `validacao/`
+pelo MESMO motivo que moveu `pipeline.py`/`validacao/confirmacao.py` na
+Fase 24a: é lógica neutra (nunca importou Tkinter, sempre foi função pura
+sobre dados), e o backend web (`web/backend/rotas/lotes.py`) precisa
+chamá-la para montar a explicação humana da Revisão sem depender de
+`leitor_matriculas.ui` — o pacote `ui` é via de mão única (só ele importa
+os outros, ver CLAUDE.md), então nada fora dele pode importar de dentro
+dele. `ui/app.py` só ajustou a linha de import; nenhuma linha de lógica
+mudou.
 
 SUGESTÃO DE VALOR: deliberadamente NÃO existe. A medição da Fase 18 sobre
 as 5 folhas reais mostrou que, nas 17 correspondências reprovadas, o

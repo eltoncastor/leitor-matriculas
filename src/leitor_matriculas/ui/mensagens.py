@@ -10,9 +10,9 @@ pergunta do programador, e não responde nenhuma das duas perguntas do
 operador: **o que aconteceu** e **o que eu faço agora**.
 
 É um módulo separado (e não mais um punhado de f-strings dentro de
-`ui/app.py`) pelo mesmo motivo que `ui/explicacao_revisao.py` é: é função
-PURA sobre texto, não importa Tkinter, e portanto pode ser verificada sem
-abrir janela nenhuma.
+`ui/app.py`) pelo mesmo motivo que `validacao/explicacao_revisao.py`
+(que morava em `ui/` até a Fase 24c) é: é função PURA sobre texto, não
+importa Tkinter, e portanto pode ser verificada sem abrir janela nenhuma.
 
 O detalhe técnico NÃO é escondido -- ele vai no fim da mensagem, rotulado
 como tal. Esconder seria trocar um problema (mensagem incompreensível) por

@@ -69,6 +69,15 @@ class LoteState:
     erros_paginas: List[dict] = dataclasses.field(default_factory=list)
     avisos_contagem: List[dict] = dataclasses.field(default_factory=list)
     avisos_descarte: List[dict] = dataclasses.field(default_factory=list)
+    # Fase 24c: a foto de cada página, comprimida (JPEG), para a tela de
+    # Revisão poder mostrá-la ao lado do formulário -- mesma ideia de
+    # `App._miniaturas_por_pagina` no Tkinter (Fase 10), inclusive o
+    # motivo de ser comprimida e não a matriz numpy crua: um lote de ~50
+    # folhas em memória bruta passaria de 1 GB. Chave é o número da
+    # página (`numero`, a posição física no lote -- mesma coluna "Página"
+    # que os registros já usam), nunca a página DENTRO de um PDF
+    # multi-arquivo (mesma distinção da Fase 14).
+    miniaturas_por_pagina: Dict[int, bytes] = dataclasses.field(default_factory=dict)
     # Contexto do lote (Fase 9): nunca compartilhado entre lotes -- cada
     # LoteState tem o seu, criado junto com o lote e nunca reaproveitado.
     contexto_lote: ContextoLote = dataclasses.field(default_factory=ContextoLote)
@@ -103,6 +112,10 @@ class LoteState:
             # LISTA já basta para o cliente não ver o array crescendo no
             # meio da leitura.
             return list(self.registros)
+
+    def obter_miniatura(self, numero_pagina: int) -> Optional[bytes]:
+        with self.lock:
+            return self.miniaturas_por_pagina.get(numero_pagina)
 
 
 _lotes: Dict[str, LoteState] = {}
@@ -161,6 +174,37 @@ def _ler_imagem(caminho: str) -> np.ndarray:
     return imagem
 
 
+# Mesmos valores de `ui/app.py` (Fase 10) -- a foto é comodidade da
+# revisão, não dado; comprimir demais perderia legibilidade do
+# manuscrito, comprimir de menos custaria a mesma explosão de RAM que a
+# Fase 10 já mediu e evitou no Tkinter.
+LARGURA_MAXIMA_MINIATURA = 1500
+QUALIDADE_MINIATURA = 85
+
+
+def _comprimir_para_miniatura(imagem_bgr) -> Optional[bytes]:
+    """Mesma lógica de `ui/app.py::_comprimir_para_miniatura` (Fase 10),
+    duplicada aqui pelo mesmo motivo que `_ler_imagem` acima -- é I/O/
+    processamento de imagem trivial, não lógica de negócio, e nada no
+    backend web pode importar de dentro de `ui/`. Nunca lança: a foto é
+    comodidade da revisão, uma falha aqui não pode derrubar o
+    processamento da página."""
+    try:
+        altura, largura = imagem_bgr.shape[:2]
+        maior = max(altura, largura)
+        if maior > LARGURA_MAXIMA_MINIATURA:
+            fator = LARGURA_MAXIMA_MINIATURA / maior
+            imagem_bgr = cv2.resize(
+                imagem_bgr, (int(largura * fator), int(altura * fator)),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buffer = cv2.imencode(".jpg", imagem_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), QUALIDADE_MINIATURA])
+        return buffer.tobytes() if ok else None
+    except Exception:
+        logging.exception("Falha ao preparar miniatura da página (revisão segue sem a foto)")
+        return None
+
+
 def _informar_etapa(estado: LoteState):
     def _callback(texto: str):
         with estado.lock:
@@ -185,6 +229,16 @@ def _processar_pagina_e_registrar(estado: LoteState, numero: int, imagem_bgr, or
             estado.pagina_atual = numero
             estado.paginas_processadas += 1
         return
+
+    # Foto da página para a tela de Revisão -- só no caminho de sucesso,
+    # mesma condição de `App._processar_item` (Fase 10): uma página que
+    # falhou pode nem ter uma imagem válida para comprimir. Fora do
+    # `with estado.lock` de propósito -- comprimir/reamostrar é CPU-bound
+    # e não precisa do lock, só a escrita no dict abaixo precisa.
+    miniatura = _comprimir_para_miniatura(imagem_bgr)
+    if miniatura is not None:
+        with estado.lock:
+            estado.miniaturas_por_pagina[numero] = miniatura
 
     # Contexto do lote ANTES de classificar (Fase 9): mesma ordem de
     # `App._adicionar_registros`.

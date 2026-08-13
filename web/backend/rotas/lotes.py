@@ -16,13 +16,19 @@ import threading
 from typing import List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from leitor_matriculas.exportacao import xlsx_exporter
 from leitor_matriculas.validacao.confirmacao import confirmar_revisao_manual
+# Fase 24c: explicacao_revisao mudou de ui/ para validacao/ nesta mesma
+# sub-fase exatamente para o backend poder importá-la sem depender de
+# `leitor_matriculas.ui` -- ver o motivo completo no docstring do módulo.
+from leitor_matriculas.validacao import explicacao_revisao
 
 from .. import estado
-from ..esquemas import ConfirmacaoRequest, ConfirmacaoResponse, LoteCriado, StatusLote
+from ..esquemas import (
+    ConfirmacaoRequest, ConfirmacaoResponse, ExplicacaoResposta, LoteCriado, StatusLote,
+)
 
 router = APIRouter(prefix="/lotes", tags=["lotes"])
 
@@ -112,6 +118,26 @@ def consultar_status(lote_id: str):
     return StatusLote(**lote.status_publico())
 
 
+def _campos_bloqueantes(registro: dict) -> List[str]:
+    """
+    Fase 24c: só o(s) NOME(s) do(s) campo(s) que bloqueiam a linha --
+    `explicacao_revisao.explicar(...).campos_bloqueantes`, sem o resto da
+    explicação (que é cara demais para calcular em massa: `sinais_de_
+    contexto` varre o lote inteiro por linha). Usado para colorir a lista
+    de pendências por tipo (mesma ideia de `CORES_TIPO_PENDENCIA` no
+    Tkinter) sem o cliente precisar de N requisições extras só para
+    montar a lista. Nunca lança: uma linha sem dossiê (sessão antiga)
+    simplesmente não tem campo bloqueante calculável.
+    """
+    try:
+        return explicacao_revisao.explicar(
+            registro.get("evidencias"), registro.get("observacao") or ""
+        ).campos_bloqueantes
+    except Exception:
+        logging.exception("Falha ao calcular campos_bloqueantes (apenas apresentação)")
+        return []
+
+
 @router.get("/{lote_id}/registros")
 def consultar_registros(lote_id: str):
     """
@@ -119,12 +145,67 @@ def consultar_registros(lote_id: str):
     que foram produzidos (mesma ordem que `_registros_exportacao` no
     Tkinter) -- pode ser chamado durante o processamento (resultado indo
     enchendo, mesma ideia da tabela ao vivo) ou depois de concluído. Cada
-    item é o dict puro de `pipeline.montar_registro_exportacao`
-    (`data`/`hora`/.../`evidencias`/`ocr_nao_associados`), sem
-    transformação nenhuma.
+    item é o dict de `pipeline.montar_registro_exportacao`
+    (`data`/`hora`/.../`evidencias`/`ocr_nao_associados`) mais
+    `campos_bloqueantes` (Fase 24c, ver `_campos_bloqueantes` acima) --
+    a ÚNICA chave acrescentada nesta camada, e é apresentação pura (o
+    dossiê já continha essa informação; só não vinha destacada). Devolve
+    CÓPIAS (`{**r, ...}`) -- nunca muta os dicts que `estado.LoteState`
+    guarda, mesma garantia que `registros_publicos()` já documenta.
     """
     lote = _lote_ou_404(lote_id)
-    return lote.registros_publicos()
+    return [{**r, "campos_bloqueantes": _campos_bloqueantes(r)} for r in lote.registros_publicos()]
+
+
+@router.get("/{lote_id}/registros/{indice}/explicacao", response_model=ExplicacaoResposta)
+def explicacao_registro(lote_id: str, indice: int):
+    """
+    "Por que preciso revisar?" -- forma HTTP de `App._explicacao_revisao_
+    atual()` (Fase 18): a cadeia OCR->normalização->base->regra em
+    linguagem de operador, mais os sinais de contexto (Fase 16, "este
+    lote usa N responsáveis", "esta linha quebra a ordem cronológica da
+    folha") -- nunca pré-seleciona nada, nunca decide nada, só explica o
+    que o motor de evidências (Fase 17) já registrou. Precisa da lista
+    INTEIRA de registros do lote (não só o registro pedido) porque
+    `sinais_de_contexto` compara a linha atual contra as outras do
+    mesmo lote/folha.
+    """
+    lote = _lote_ou_404(lote_id)
+    registros = lote.registros_publicos()
+    if not (0 <= indice < len(registros)):
+        raise HTTPException(status_code=404, detail=f"Registro {indice} não existe no lote '{lote_id}'")
+
+    registro = registros[indice]
+    explicacao = explicacao_revisao.explicar(registro.get("evidencias"), registro.get("observacao") or "")
+    sinais = explicacao_revisao.sinais_de_contexto(registros, indice)
+    return ExplicacaoResposta(
+        explicacao={
+            "campos_bloqueantes": explicacao.campos_bloqueantes,
+            "titulo": explicacao.titulo,
+            "detalhes": explicacao.detalhes,
+            "por_campo": explicacao.por_campo,
+        },
+        sinais_contexto=[sinal.como_dicionario() for sinal in sinais],
+    )
+
+
+@router.get("/{lote_id}/paginas/{numero}/imagem")
+def imagem_pagina(lote_id: str, numero: int):
+    """
+    A foto da página de origem (JPEG comprimido -- ver `estado.
+    _comprimir_para_miniatura`, mesmos parâmetros de `ui/app.py`), para a
+    tela de Revisão mostrar ao lado do formulário. `404` (não um JPEG em
+    branco) quando a página não tem foto disponível -- página com ERRO de
+    renderização, ou lote carregado de uma sessão sem imagem -- mesmo
+    texto de causa que `_mostrar_foto_pagina` já trata no Tkinter
+    ("(foto indisponível)"), decidido pelo CLIENTE a partir do 404, não
+    inventado aqui.
+    """
+    lote = _lote_ou_404(lote_id)
+    miniatura = lote.obter_miniatura(numero)
+    if miniatura is None:
+        raise HTTPException(status_code=404, detail=f"Sem foto disponível para a página {numero}")
+    return Response(content=miniatura, media_type="image/jpeg")
 
 
 @router.post("/{lote_id}/registros/{indice}/confirmar", response_model=ConfirmacaoResponse)
@@ -160,6 +241,27 @@ def confirmar_registro(lote_id: str, indice: int, corpo: ConfirmacaoRequest):
         confirmou_agora=resultado.confirmou_agora,
         observacao_classificacao=resultado.observacao_classificacao,
     )
+
+
+@router.get("/{lote_id}/listas")
+def listas_de_apoio(lote_id: str):
+    """
+    Motivos/Responsáveis cadastrados -- para o formulário de revisão
+    sugerir (`<datalist>`, nunca um `<select>` fechado: o operador
+    continua podendo colar/ajustar um texto que não está na lista, mesma
+    liberdade do `Combobox` editável do Tkinter -- ver `_montar_aba_
+    revisao`). Só leitura de `DataManager.listar_motivos`/`listar_
+    gestores`, que já existiam desde antes da Fase 24 -- nenhuma lista
+    nova, nenhuma decisão. Sob `/lotes/{lote_id}` por consistência de
+    rota, mas o conteúdo é global ao processo (mesma base para todo
+    lote, ver `estado.obter_data_manager`).
+    """
+    _lote_ou_404(lote_id)
+    dm = estado.obter_data_manager()
+    return {
+        "motivos": sorted(dm.listar_motivos() or []),
+        "gestores": sorted(dm.listar_gestores() or []),
+    }
 
 
 @router.get("/{lote_id}/exportar")

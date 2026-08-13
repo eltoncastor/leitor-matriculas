@@ -176,6 +176,64 @@ def teste_fluxo_imagem_unica():
     print()
 
 
+def teste_explicacao_e_imagem_pagina():
+    """Sub-fase 24c: os dois endpoints novos da tela de Revisão --
+    explicação humana da pendência (Fase 17/18 expostas via API) e a foto
+    da página de origem."""
+    print("=== Teste 5 (24c): GET .../explicacao e GET .../paginas/{n}/imagem ===")
+    _resetar_estado_global()
+    tmp = tempfile.mkdtemp(prefix="teste_api_mock_")
+    caminho = _preparar_imagem_valida(tmp)
+
+    fake_engine = MagicMock()
+    fake_engine.recognize.return_value = RESULTADOS_OCR
+    estado._ocr_engine = fake_engine
+    estado._data_manager = _DataManagerFake()
+
+    client = TestClient(app)
+    with open(caminho, "rb") as f:
+        resp = client.post("/lotes", files={"files": (os.path.basename(caminho), f, "image/jpeg")})
+    lote_id = resp.json()["lote_id"]
+    client.post(f"/lotes/{lote_id}/processar")
+    _esperar_conclusao_sincrona(client, lote_id)
+
+    registros = client.get(f"/lotes/{lote_id}/registros").json()
+    # Fase 24c: a lista já enriquecida com campos_bloqueantes, sem
+    # precisar de uma requisição por linha.
+    for r in registros:
+        assert "campos_bloqueantes" in r, r
+    confirmado = next(r for r in registros if r["status"] == "CONFIRMADO")
+    revisao_idx, revisao = next((i, r) for i, r in enumerate(registros) if r["status"] == "REVISAO")
+    assert confirmado["campos_bloqueantes"] == [], confirmado
+    assert "matricula" in revisao["campos_bloqueantes"], revisao
+    print("  OK: GET /registros enriquecido com campos_bloqueantes (vazio p/ CONFIRMADO, "
+          f"{revisao['campos_bloqueantes']} p/ a linha REVISAO)")
+
+    resp = client.get(f"/lotes/{lote_id}/registros/{revisao_idx}/explicacao")
+    assert resp.status_code == 200, resp.text
+    corpo = resp.json()
+    assert corpo["explicacao"]["campos_bloqueantes"] == revisao["campos_bloqueantes"]
+    assert corpo["explicacao"]["titulo"], corpo
+    assert isinstance(corpo["explicacao"]["detalhes"], list) and corpo["explicacao"]["detalhes"]
+    assert isinstance(corpo["sinais_contexto"], list)
+    print(f"  OK: GET .../explicacao -- título: {corpo['explicacao']['titulo']!r}")
+
+    resp = client.get(f"/lotes/{lote_id}/registros/999/explicacao")
+    assert resp.status_code == 404
+    print("  OK: índice inexistente -> 404 (nunca inventa explicação)")
+
+    resp = client.get(f"/lotes/{lote_id}/paginas/1/imagem")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert len(resp.content) > 0
+    print(f"  OK: GET .../paginas/1/imagem -- {len(resp.content)} bytes JPEG")
+
+    resp = client.get(f"/lotes/{lote_id}/paginas/999/imagem")
+    assert resp.status_code == 404
+    print("  OK: página sem foto -> 404 (nunca devolve imagem em branco)")
+    print()
+
+
 def teste_isolamento_falha_lote_imagens():
     print("=== Teste 2: lote de imagens com 1 arquivo corrompido no meio -- isola, não aborta (Fase 7) ===")
     _resetar_estado_global()
@@ -270,11 +328,12 @@ def teste_erros_http():
 
 def main():
     teste_fluxo_imagem_unica()
+    teste_explicacao_e_imagem_pagina()
     teste_isolamento_falha_lote_imagens()
     teste_lote_pdf_multipagina()
     teste_erros_http()
     print("=" * 70)
-    print("TESTE DE API COM OCR MOCKADO (SUB-FASE 24a): TUDO OK")
+    print("TESTE DE API COM OCR MOCKADO (SUB-FASES 24a/24c): TUDO OK")
 
 
 if __name__ == "__main__":

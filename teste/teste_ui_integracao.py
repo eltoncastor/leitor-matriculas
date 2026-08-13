@@ -301,7 +301,7 @@ with patch('leitor_matriculas.ui.app.Messagebox.show_error') as m_err, patch('le
               "nenhum campo pre-preenchido")
 
     # A explicacao nunca inventa: sem dossie e sem observacao, sai vazia.
-    from leitor_matriculas.ui import explicacao_revisao as _expl
+    from leitor_matriculas.validacao import explicacao_revisao as _expl  # Fase 24c: mudou de ui/ para validacao/
     assert _expl.explicar([], "").vazia, "explicacao sem dado nenhum deveria sair vazia"
     assert not _expl.explicar([], "algum motivo").vazia, \
         "sem dossie, a observacao antiga ainda deve ser mostrada"

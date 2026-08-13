@@ -70,16 +70,21 @@ npm run lint         # oxlint
 
 ```
 web/frontend/src/
-  lib/api.js               -- único ponto que fala com o backend (os 6 endpoints)
+  lib/api.js               -- único ponto que fala com o backend (10 endpoints)
   components/ui/            -- Button, GlassCard, ProgressBar, StatusBadge
-  components/layout/         -- AppShell (cabeçalho + fundo, sem lógica)
+  components/layout/         -- AppShell (cabeçalho + fundo, sem lógica; prop `largo`)
   features/lote/               -- telas do fluxo de um lote (Seleção, Processamento, Resultado)
-  pages/                         -- rotas: "/" , "/lote/:loteId", "/lote/:loteId/revisao"
+  features/revisao/              -- useRevisao (controlador), ListaPendencias, FotoFolha,
+                                     FormularioRevisao, vocabulario (rótulos/cores por campo)
+  pages/                           -- rotas: "/" , "/lote/:loteId", "/lote/:loteId/revisao"
 ```
 
-### O que já existe (24b) / o que falta (24c/24d)
+### O que já existe (24a/24b/24c) / o que falta (24d)
 
-Fluxo principal completo e navegável: Seleção → Conferência → Processamento (progresso ao
-vivo por polling) → Resultado (contagens + baixar planilha + ir para Revisão). A tela de
-Revisão em si (foto da folha, explicação da Fase 18, correção manual) ainda é só um
-placeholder — Sub-fase 24c.
+Fluxo principal completo: Seleção → Conferência → Processamento (progresso ao vivo por
+polling) → Resultado (contagens + baixar planilha + ir para Revisão). A tela de Revisão
+(24c) está completa: as três áreas (pendências / foto da folha / campo bloqueante +
+formulário), explicação humana da Fase 18 ("Por que está em revisão?" / "Ver detalhes"),
+confirmação real via `confirmar_revisao_manual` (a mesma função do Tkinter). Falta só a
+Sub-fase 24d: polimento visual final e a verificação de fidelidade comportamental
+completa contra o Tkinter.

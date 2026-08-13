@@ -78,3 +78,28 @@ export async function confirmarRegistro(loteId, indice, campos) {
 export function urlExportar(loteId) {
   return `${BASE}/lotes/${loteId}/exportar`;
 }
+
+/**
+ * Fase 24c: "Por que preciso revisar?" -- explicação humana (Fase 17/18)
+ * mais os sinais de contexto (Fase 16) de UM registro. Nunca decide nada;
+ * só traduz o que o motor de evidências já registrou.
+ */
+export async function consultarExplicacao(loteId, indice) {
+  const resposta = await pedir(`/lotes/${loteId}/registros/${indice}/explicacao`);
+  return resposta.json();
+}
+
+/** Listas fechadas de Motivo/Responsável, para sugerir no formulário de
+ * revisão (nunca restringe -- o operador pode digitar outra coisa, mesma
+ * liberdade do Combobox editável do Tkinter). */
+export async function consultarListas(loteId) {
+  const resposta = await pedir(`/lotes/${loteId}/listas`);
+  return resposta.json();
+}
+
+/** URL da foto da página de origem -- usada direto num `<img src>` (o
+ * navegador trata o 404 "sem foto disponível" via o evento onError do
+ * próprio <img>, nunca escondido/inventado aqui). */
+export function urlImagemPagina(loteId, numeroPagina) {
+  return `${BASE}/lotes/${loteId}/paginas/${numeroPagina}/imagem`;
+}

@@ -14,7 +14,7 @@ com pequenas variações ("✓ CONFIRMADO" vs. o que a Fase 12/18 mostravam
 em prosa). Um módulo dedicado, puro (não importa Tkinter), garante que
 "o que é um REVISAO" -- ícone, palavra, cor -- só é decidido aqui, e é
 testável sem abrir janela nenhuma, mesma razão de `ui/mensagens.py` e
-`ui/explicacao_revisao.py`.
+`validacao/explicacao_revisao.py` (que morava em `ui/` até a Fase 24c).
 
 NÃO é um "componente" nem um motor de temas: não decide layout, não
 substitui `ttkbootstrap`, só nomeia os valores que `ui/app.py` já usava
@@ -316,8 +316,8 @@ RAIO_PADRAO = 8   # px -- valor de referência para quando houver um jeito de ap
 
 # ---------------------------------------------------------------------
 # Ícones (Sub-fase 22a) -- auditoria dos símbolos já em uso em
-# `ui/app.py`, `ui/mensagens.py` e `ui/explicacao_revisao.py`, reunidos
-# aqui como vocabulário nomeado. Nenhum ícone NOVO foi introduzido: os
+# `ui/app.py`, `ui/mensagens.py` e `validacao/explicacao_revisao.py`
+# (que morava em `ui/` até a Fase 24c), reunidos aqui como vocabulário nomeado. Nenhum ícone NOVO foi introduzido: os
 # nomes abaixo só apontam para os mesmos caracteres Unicode que o
 # programa já desenha, para telas futuras reusarem o NOME em vez de
 # copiar o glifo.

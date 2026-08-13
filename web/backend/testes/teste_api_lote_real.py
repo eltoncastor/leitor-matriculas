@@ -22,7 +22,14 @@ O que este arquivo prova, que nenhum outro teste prova:
      perde nada entre o cliente e a função de decisão compartilhada com o
      Tkinter (é essa igualdade, campo a campo, que substitui "comparar
      com o que o Tkinter faria": desde a Fase 24a, `_revisao_confirmar` no
-     Tkinter É essa mesma função).
+     Tkinter É essa mesma função);
+  4. (Fase 24c) os endpoints novos da tela de Revisão -- `.../explicacao`,
+     `.../paginas/{n}/imagem`, `.../listas` -- respondem corretamente
+     contra dado real, e duas correções REAIS e conhecidas (matrícula
+     27325: DATA perdida, a foto mostra 13/04/26, Fase 16; matrícula
+     26319: HORA truncada, a folha mostra 07:49, Fase 12) resolvem de
+     verdade pela API, exatamente como já foi verificado manualmente pela
+     interface web real (ver `saida/avaliacao_fase24_web.md`, seção 24c).
 
 Rodar (a partir da raiz do projeto, com o venv ativo):
     python web\\backend\\testes\\teste_api_lote_real.py
@@ -217,8 +224,100 @@ def main():
         assert resp.status_code == 404, f"{caminho} -> {resp.status_code}"
     print("  OK: todo endpoint isola por lote_id -- nenhum 'estado atual' implícito")
 
+    print("\n=== Teste 13 (24c): GET /registros vem enriquecido com campos_bloqueantes ===")
+    registros_atuais = client.get(f"/lotes/{lote_id}/registros").json()
+    for r in registros_atuais:
+        assert "campos_bloqueantes" in r
+    ainda_revisao = [r for r in registros_atuais if r["status"] == "REVISAO"]
+    assert all(r["campos_bloqueantes"] for r in ainda_revisao), (
+        "toda linha REVISAO com dossiê deveria ter pelo menos 1 campo bloqueante identificado"
+    )
+    print(f"  OK: {len(ainda_revisao)} linha(s) REVISAO, todas com campos_bloqueantes não vazio")
+
+    print("\n=== Teste 14 (24c): GET .../explicacao e GET .../paginas/{n}/imagem contra dado real ===")
+    idx_qualquer_revisao = next(i for i, r in enumerate(registros_atuais) if r["status"] == "REVISAO")
+    resp = client.get(f"/lotes/{lote_id}/registros/{idx_qualquer_revisao}/explicacao")
+    assert resp.status_code == 200, resp.text
+    corpo_explicacao = resp.json()
+    assert corpo_explicacao["explicacao"]["titulo"]
+    assert corpo_explicacao["explicacao"]["campos_bloqueantes"] == registros_atuais[idx_qualquer_revisao]["campos_bloqueantes"]
+    print(f"  OK: explicação real -- {corpo_explicacao['explicacao']['titulo']!r}")
+
+    resp = client.get(f"/lotes/{lote_id}/paginas/1/imagem")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert len(resp.content) > 10_000, "a foto real da página 1 deveria ter um tamanho não-trivial"
+    print(f"  OK: foto real da página 1 -- {len(resp.content)} bytes JPEG")
+
+    resp = client.get(f"/lotes/{lote_id}/listas")
+    assert resp.status_code == 200, resp.text
+    listas = resp.json()
+    assert isinstance(listas["motivos"], list) and isinstance(listas["gestores"], list)
+    print(f"  OK: /listas -- {len(listas['motivos'])} motivo(s), {len(listas['gestores'])} responsável(is) cadastrados")
+
+    print("\n=== Teste 15 (24c): duas correções REAIS que resolvem de verdade (fatos documentados nas Fases 12/16) ===")
+    # As mesmas duas linhas conhecidas deste lote de 5 folhas reais desde
+    # as Fases 12/15/16 (ver CLAUDE.md): matrícula 27325 (página 1) tem a
+    # DATA perdida ("13104126" no OCR -- a foto mostra 13/04/26, Fase 16);
+    # matrícula 26319 (página 1) tem a HORA truncada ("07:4" no OCR -- a
+    # folha mostra 07:49, Fase 12 -- é o caso que deu origem à Fase 12
+    # inteira). Reaproveita o MESMO lote/API que o resto deste arquivo já
+    # processou -- nenhuma chamada de OCR nova.
+    #
+    # IMPORTANTE (mesmo comportamento do formulário real -- `revisao_
+    # vars`/`campos` no Tkinter/frontend): o corpo de `.../confirmar`
+    # representa TUDO que está digitado no formulário no momento do
+    # clique, não só o campo que mudou -- um campo mandado como "" é
+    # "o operador deixou em branco", NUNCA "mantenha o que já estava lá".
+    # Por isso a correção parte dos valores ATUAIS do registro (como o
+    # formulário real já vem pré-preenchido) e só troca o campo em dúvida.
+    def _registro_por_matricula(matricula):
+        for i, r in enumerate(client.get(f"/lotes/{lote_id}/registros").json()):
+            if r["matricula"] == matricula and r["status"] == "REVISAO":
+                return i, r
+        return None, None
+
+    def _campos_atuais(registro):
+        return {
+            "data": registro.get("data") or "",
+            "hora": registro.get("hora") or "",
+            "matricula": registro.get("matricula") or "",
+            "gestor": registro.get("gestor") or "",
+            "motivo": registro.get("motivo") or "",
+        }
+
+    idx_27325, registro_27325 = _registro_por_matricula("27325")
+    if idx_27325 is not None:
+        campos = _campos_atuais(registro_27325)
+        campos["data"] = "13/04/26"
+        resp = client.post(f"/lotes/{lote_id}/registros/{idx_27325}/confirmar", json=campos)
+        assert resp.status_code == 200, resp.text
+        corpo = resp.json()
+        assert corpo["confirmou_agora"] is True, (
+            f"matrícula 27325 deveria resolver com data=13/04/26 (fato documentado, Fase 16); "
+            f"observação: {corpo['registro']['observacao']!r}"
+        )
+        print("  OK: matrícula 27325 -- DATA corrigida para 13/04/26 -> CONFIRMADO de verdade")
+    else:
+        print("  (matrícula 27325 não está mais pendente nesta execução -- pulando, sem falhar o teste)")
+
+    idx_26319, registro_26319 = _registro_por_matricula("26319")
+    if idx_26319 is not None:
+        campos = _campos_atuais(registro_26319)
+        campos["hora"] = "07:49"
+        resp = client.post(f"/lotes/{lote_id}/registros/{idx_26319}/confirmar", json=campos)
+        assert resp.status_code == 200, resp.text
+        corpo = resp.json()
+        assert corpo["confirmou_agora"] is True, (
+            f"matrícula 26319 deveria resolver com hora=07:49 (fato documentado, Fase 12); "
+            f"observação: {corpo['registro']['observacao']!r}"
+        )
+        print("  OK: matrícula 26319 -- HORA corrigida para 07:49 -> CONFIRMADO de verdade")
+    else:
+        print("  (matrícula 26319 não está mais pendente nesta execução -- pulando, sem falhar o teste)")
+
     print("\n" + "=" * 70)
-    print("TESTE DE API CONTRA O LOTE REAL (SUB-FASE 24a): TUDO OK")
+    print("TESTE DE API CONTRA O LOTE REAL (SUB-FASES 24a/24c): TUDO OK")
 
 
 if __name__ == "__main__":

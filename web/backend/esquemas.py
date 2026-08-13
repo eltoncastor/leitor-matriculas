@@ -57,5 +57,20 @@ class ConfirmacaoResponse(BaseModel):
     observacao_classificacao: str
 
 
+class ExplicacaoResposta(BaseModel):
+    """
+    Fase 24c: forma HTTP de `validacao.explicacao_revisao.explicar()` +
+    `.sinais_de_contexto()` (Fase 18) -- exposição pura, sem decisão
+    nenhuma nova. `explicacao`/`sinais_contexto` trafegam como `dict`
+    puro (mesma razão do `registro` em `ConfirmacaoResponse`): são
+    exatamente os campos que `ExplicacaoRevisao`/`Evidencia` já produzem
+    (`campos_bloqueantes`/`titulo`/`detalhes`/`por_campo` e
+    `campo`/`tipo`/`origem`/`resultado`/`motivo`/`valor_observado`/
+    `valor_relacionado`), sem reformulação.
+    """
+    explicacao: Dict[str, Any]
+    sinais_contexto: List[Dict[str, Any]]
+
+
 class ErroResposta(BaseModel):
     detalhe: str

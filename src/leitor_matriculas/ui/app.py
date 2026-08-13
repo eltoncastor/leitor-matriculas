@@ -83,7 +83,12 @@ from leitor_matriculas.parsing.contexto_lote import ContextoLote
 # tela (tabela, contador, fila, navegação).
 from leitor_matriculas import pipeline
 from leitor_matriculas.validacao.confirmacao import NAO_ENCONTRADO, confirmar_revisao_manual
-from leitor_matriculas.ui import explicacao_revisao
+# Fase 24c: `explicacao_revisao` mudou de `ui/` para `validacao/` -- é
+# lógica neutra (nunca importou Tkinter) que o backend web também
+# precisa chamar, e nada fora de `ui/` pode importar de dentro dela (via
+# de mão única do projeto). Só esta linha mudou; nada de `ui/app.py`
+# além do caminho do import foi tocado.
+from leitor_matriculas.validacao import explicacao_revisao
 from leitor_matriculas.ui import mensagens
 from leitor_matriculas.ui import estilos
 from leitor_matriculas.ui import preferencias
