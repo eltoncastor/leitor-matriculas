@@ -105,6 +105,33 @@ sempre através da tailnet privada (só os dispositivos da própria conta), nunc
 internet pública. Ver o docstring de `web/backend/main.py` e
 `saida/ajuste_acesso_tailscale.md` para o detalhe completo da mudança de decisão.
 
+## Modo desktop — janela nativa (Sub-fase 25a)
+
+Retomada da ideia de portabilidade (Fase 25, ver CLAUDE.md) — desta vez mirando a versão
+WEB, não o Tkinter. Um processo Python SÓ, com uma janela nativa (`pywebview`) no lugar
+do navegador — sem precisar do `vite dev` rodando à parte. Ainda não é um `.exe`
+(isso é a Sub-fase 25b, empacotamento com PyInstaller); continua rodando via `python`.
+
+```powershell
+# 1. Build de produção do frontend (uma vez, ou de novo a cada mudança no frontend):
+cd web\frontend
+npm run build          # gera web\frontend\dist\
+cd ..\..
+
+# 2. Janela nativa (sobe o backend internamente, numa thread -- não é
+#    um segundo processo/terminal):
+python web\desktop_app.py
+```
+
+Fechar a janela encerra o servidor interno junto — não sobra nenhum processo
+`python`/`uvicorn` rodando depois. Sem o build de produção (`dist/index.html` ausente),
+o script avisa e sai, em vez de abrir uma janela mostrando só a API pura.
+
+Este modo é independente do modo de desenvolvimento (`vite dev` + `python web\backend\main.py`
+em dois terminais, seção acima) e do acesso remoto via Tailscale — os três continuam
+existindo e funcionando lado a lado. Ver `saida/avaliacao_fase25_exe.md` para o detalhe
+completo (decisão sobre CORS, tamanho de baseline medido, limitações).
+
 ### Estrutura
 
 ```

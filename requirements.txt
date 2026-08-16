@@ -38,3 +38,11 @@ PyMuPDF>=1.24.0,<2.0.0
 fastapi>=0.110.0,<1.0.0
 uvicorn>=0.29.0,<1.0.0
 python-multipart>=0.0.9
+
+# Sub-fase 25a (retomada da Fase 25 -- empacotamento web em .exe portátil)
+# — só para quem for rodar `web/desktop_app.py` (a janela nativa). No
+# Windows usa o WebView2/Edge Chromium já presente no sistema (Windows 10
+# 1803+ já vem com ele; senão, o runtime é um download separado da
+# Microsoft, fora do controle deste projeto) — não embute um Chromium
+# próprio, ao contrário do Electron.
+pywebview>=6.0,<7.0

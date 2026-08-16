@@ -52,6 +52,30 @@ ou, com autorreload durante o desenvolvimento:
 
 A documentação interativa (Swagger) fica em http://127.0.0.1:8000/docs
 (uso local) ou http://<IP-tailscale-desta-máquina>:8000/docs (acesso remoto).
+
+SUB-FASE 25a (retomada da Fase 25 -- empacotamento web em .exe portátil,
+ver CLAUDE.md e `saida/avaliacao_fase25_exe.md`): este processo passou a
+também SERVIR o build de produção do frontend (`npm run build` em
+`web/frontend/dist/`), além da API -- é o que permite um processo Python
+SÓ (sem `vite dev` separado), pré-requisito para a janela nativa
+(`web/desktop_app.py`) e para o empacotamento em `.exe` da 25b. O modo de
+desenvolvimento com dois processos (`vite dev` + este arquivo) CONTINUA
+existindo e funcionando -- ver `web/README.md` -- esta sub-fase só
+ACRESCENTA o modo de processo único, não remove o modo dev. Se
+`web/frontend/dist/index.html` não existir (build nunca rodado), este
+arquivo funciona exatamente como antes: só API, sem servir nada estático
+-- ver o `if` logo antes da rota catch-all, mais abaixo.
+
+CORS -- decisão revisada e mantida como estava, com justificativa nova: em
+processo único (frontend e API na MESMA origem/porta), CORS se torna
+inerte para esse modo -- não há requisição cross-origin nenhuma para
+filtrar. Mas o modo de DESENVOLVIMENTO (`vite dev` em outra porta) e o
+acesso remoto via Tailscale a esse modo dev CONTINUAM existindo como fluxo
+suportado (ver `saida/ajuste_acesso_tailscale.md`), e esses SIM se
+beneficiam do CORS já configurado -- então o middleware abaixo não foi
+removido nem simplificado. Mantê-lo não tem custo (é inerte, não
+intrusivo, no modo processo único) e continua necessário no modo que
+ainda existe.
 """
 import os
 import sys
@@ -66,8 +90,12 @@ _RAIZ_PROJETO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 sys.path.insert(0, os.path.join(_RAIZ_PROJETO, "src"))
 sys.path.insert(0, _RAIZ_PROJETO)
 
-from fastapi import FastAPI  # noqa: E402  (precisa vir depois do sys.path)
+import pathlib  # noqa: E402
+
+from fastapi import FastAPI, HTTPException  # noqa: E402  (precisa vir depois do sys.path)
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from web.backend.rotas import lotes  # noqa: E402
 
@@ -102,13 +130,86 @@ app.add_middleware(
 )
 
 app.include_router(lotes.router)
+# Sub-fase 25a: MESMO router, montado TAMBÉM sob "/api" -- é o prefixo que
+# `src/lib/api.js` (`BASE = "/api"`) sempre usou. Em modo dev, quem faz
+# esse prefixo virar as rotas nuas (`/lotes/...`) é o proxy do Vite
+# (`vite.config.js`, `rewrite: path.replace(/^\/api/, '')`); em modo
+# processo único NÃO HÁ Vite nenhum reescrevendo nada -- o próprio
+# navegador chama `/api/lotes` direto contra este processo. Duplicar o
+# `include_router` (mesmas funções, mesma lógica, zero reimplementação) é
+# mais simples e mais seguro do que ensinar o backend a fazer sua própria
+# reescrita de path, e mantém as DUAS formas funcionando: `/lotes/...`
+# (o que os testes existentes -- `teste_api_mock.py`/`teste_api_lote_
+# real.py` -- e o uso direto da API sempre chamaram) e `/api/lotes/...`
+# (o que o frontend buildado chama, nos dois modos).
+app.include_router(lotes.router, prefix="/api")
 
 
 @app.get("/saude")
+@app.get("/api/saude")
 def saude():
     """Checagem simples de que o processo está de pé -- não toca em
-    OCR/bases, só confirma que a API responde."""
+    OCR/bases, só confirma que a API responde. Espelhada em /api/saude
+    pelo mesmo motivo do router acima (Sub-fase 25a)."""
     return {"status": "ok"}
+
+
+# ======================================================================
+# Sub-fase 25a -- serve o build de produção do frontend (SPA React), só
+# quando ele existe (`npm run build` já rodado). Registrado por ÚLTIMO,
+# de propósito: o Starlette resolve rotas na ORDEM DE REGISTRO, e toda
+# rota mais específica definida ACIMA (`/lotes/...`, `/api/...`,
+# `/saude`, mais `/docs`/`/redoc`/`/openapi.json` que o FastAPI já
+# registrou dentro do `FastAPI(...)` no topo do arquivo) já "ganha" a
+# correspondência antes do catch-all abaixo sequer ser avaliado -- é
+# exatamente a armadilha que se pretende evitar: uma rota catch-all de
+# SPA registrada CEDO demais roubaria essas rotas de API.
+# ======================================================================
+_DIST_DIR = pathlib.Path(_RAIZ_PROJETO) / "web" / "frontend" / "dist"
+_DIST_INDEX = _DIST_DIR / "index.html"
+
+if _DIST_INDEX.is_file():
+    # Só os arquivos hasheados (JS/CSS/fontes) -- os poucos arquivos soltos
+    # na raiz do build (favicon.svg, icons.svg) são tratados pelo
+    # catch-all abaixo, junto com o próprio index.html.
+    app.mount("/assets", StaticFiles(directory=_DIST_DIR / "assets"), name="frontend-assets")
+
+    # Nomes que já são rotas de API reais (ou prefixos delas) -- usados
+    # abaixo como DEFESA EM PROFUNDIDADE, não como o mecanismo principal
+    # de roteamento (que já é garantido pela ordem de registro acima).
+    # Sem isto, um subcaminho de API mal formado que não bate o padrão de
+    # NENHUM endpoint real (ex. "/lotes/abc/rota-que-nao-existe") cairia
+    # neste catch-all e devolveria a página HTML da SPA em vez de um 404
+    # -- escondendo o erro real (rota de API inexistente) atrás de uma
+    # tela do React tentando (e falhando silenciosamente) interpretar
+    # HTML como se fosse a resposta JSON esperada.
+    _PRIMEIRO_SEGMENTO_RESERVADO = {"api", "lotes", "saude", "docs", "redoc", "openapi.json"}
+
+    @app.get("/{caminho:path}")
+    def servir_frontend(caminho: str):
+        """
+        Catch-all da SPA: qualquer caminho que nenhuma rota de API
+        reconheceu. Dois casos: (1) um arquivo real do build que não está
+        em "/assets" (hoje só `favicon.svg`/`icons.svg`, na raiz de
+        `dist/`) -- devolve o arquivo; (2) qualquer outra coisa -- é uma
+        rota do REACT ROUTER (`/lote/:id`, `/lote/:id/revisao`), que só o
+        JAVASCRIPT carregado sabe resolver, então devolve sempre o MESMO
+        `index.html` (o padrão universal de "SPA fallback").
+        """
+        primeiro_segmento = caminho.split("/", 1)[0]
+        if primeiro_segmento in _PRIMEIRO_SEGMENTO_RESERVADO:
+            raise HTTPException(status_code=404, detail=f"Rota de API não encontrada: /{caminho}")
+
+        # Resolve dentro de `_DIST_DIR` e confere que o resultado continua
+        # DENTRO dela antes de servir -- impede um caminho tipo
+        # "../../../Windows/win.ini" de escapar da pasta do build (o
+        # processo passou a escutar em 0.0.0.0 desde o ajuste do
+        # Tailscale, então esta rota é alcançável pela rede, não só de
+        # localhost).
+        candidato = (_DIST_DIR / caminho).resolve()
+        if caminho and candidato.is_file() and candidato.is_relative_to(_DIST_DIR.resolve()):
+            return FileResponse(candidato)
+        return FileResponse(_DIST_INDEX)
 
 
 if __name__ == "__main__":
