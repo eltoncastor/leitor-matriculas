@@ -113,6 +113,15 @@ def _esperar_servidor_pronto(timeout_s: float = 20.0) -> bool:
 
 
 def main() -> int:
+    # Achado real (botão "Baixar planilha" sem nenhum efeito no .exe): o
+    # pywebview desabilita downloads por padrão desde a versão 4.4 -- o
+    # link `<a href=... download>` de `Resultado.jsx` continua sendo um
+    # link comum, mas o WebView2 engole o clique em silêncio (nenhum erro,
+    # nenhum diálogo) até este `settings` ser ligado explicitamente. Tem
+    # que vir ANTES de `create_window`, que é quando a janela/engine é
+    # de fato instanciada.
+    webview.settings["ALLOW_DOWNLOADS"] = True
+
     if not _DIST_INDEX.is_file():
         print(
             "AVISO: build de produção do frontend não encontrado em "
