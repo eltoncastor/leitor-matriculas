@@ -11,7 +11,24 @@ import tailwindcss from '@tailwindcss/vite'
 // prefixo só no backend também seria válido, mas mudaria o contrato que a
 // Sub-fase 24a já commitou, e o pedido desta sub-fase é ajuste de
 // contrato só quando necessário.
-export default defineConfig({
+//
+// Ajuste pontual pós-Fase 25 (deploy atrás de sub-path, ver CLAUDE.md e
+// saida/ajuste_subpath_leitor.md): `base` passou a ser resolvido a partir
+// da variável de ambiente `VITE_BASE_PATH`, lida só no momento do BUILD de
+// produção (`command === 'build'`) -- o servidor de dev nunca usa outra
+// base além de "/". Sem a variável definida, o build continua idêntico a
+// antes (`base: "/"`) -- é o caso do build padrão usado pelo app desktop
+// (`web/desktop_app.py`) e pelo `.exe` (Fase 25b), que abrem a janela em
+// `http://127.0.0.1:8765/` e QUEBRARIAM se `base` virasse "/leitor/" pra
+// eles também (o `basename` do React Router, ver src/main.jsx, deixaria de
+// bater com a URL real). Só o deploy atrás do Cloudflare Tunnel na VPS
+// (`https://eltonmarques.com/leitor`) roda o build com
+// `VITE_BASE_PATH=/leitor/ npm run build` -- é o ÚNICO lugar onde
+// "/leitor" é mencionado; nenhum arquivo-fonte do frontend contém essa
+// string, tudo deriva de `import.meta.env.BASE_URL` (ver src/lib/api.js e
+// src/main.jsx).
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? (process.env.VITE_BASE_PATH || '/') : '/',
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
@@ -39,4 +56,4 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.js'],
     globals: true,
   },
-})
+}))

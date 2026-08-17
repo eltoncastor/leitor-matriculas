@@ -160,6 +160,34 @@ versionada. Ver `saida/avaliacao_fase25_exe.md` para as decisões medidas (`--on
 `--onefile`, o que foi investigado para reduzir tamanho, os problemas reais resolvidos
 no `.spec`) e o tamanho final do pacote.
 
+## Deploy atrás de sub-path (ex.: VPS + Cloudflare Tunnel)
+
+Ajuste pontual pós-Fase 25 — ver `saida/ajuste_subpath_leitor.md` para o relatório
+completo (problema, causa raiz, testes). Resumo: quando este app é publicado num domínio
+compartilhado, sob um prefixo de caminho (ex. `https://eltonmarques.com/leitor`, atrás de
+um Cloudflare Tunnel que roteia só `/leitor/*` até este backend), o build de produção
+precisa saber disso — senão os assets (`/assets/*.js`, `/favicon.svg`) são referenciados
+sem o prefixo e o proxy não encontra pra onde encaminhar (404, tela branca).
+
+```bash
+# Na VPS (ou em qualquer build destinado a rodar sob um sub-path):
+cd web/frontend
+VITE_BASE_PATH=/leitor/ npm run build
+cd ../..
+python web/backend/main.py
+```
+
+**Sem a variável `VITE_BASE_PATH`, o build continua idêntico a antes** (`base: "/"`) — é
+o que o modo desktop (seção acima) e o `.exe` (Sub-fase 25b) continuam usando, sem
+nenhuma mudança de comportamento. O backend (`web/backend/main.py`) responde nos dois
+formatos (com e sem o prefixo `/leitor`) independentemente de como o `dist/` local foi
+construído, então testar localmente sem proxy nenhum (`http://127.0.0.1:8000/leitor`)
+também funciona.
+
+Ajuste o valor de `VITE_BASE_PATH` (e a regra de ingress do proxy correspondente) se o
+sub-path publicado for outro — não há nada fixo em `/leitor` além do valor passado nesse
+comando.
+
 ### Estrutura
 
 ```

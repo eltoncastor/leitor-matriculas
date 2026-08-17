@@ -143,14 +143,26 @@ app.include_router(lotes.router)
 # real.py` -- e o uso direto da API sempre chamaram) e `/api/lotes/...`
 # (o que o frontend buildado chama, nos dois modos).
 app.include_router(lotes.router, prefix="/api")
+# Ajuste pontual pós-Fase 25 (deploy atrás de sub-path, ver CLAUDE.md e
+# saida/ajuste_subpath_leitor.md): na VPS, atrás do Cloudflare Tunnel, o
+# app fica publicado em "https://eltonmarques.com/leitor" -- o mesmo
+# MESMO router, uma terceira vez, sob "/leitor/api" (a base que o
+# frontend buildado com `VITE_BASE_PATH=/leitor/` chama, ver
+# src/lib/api.js). Não se sabe, e não é controlado por este repositório,
+# se o encaminhamento do túnel remove o prefixo "/leitor" antes de chegar
+# aqui -- por isso o backend responde nos dois formatos (com e sem o
+# prefixo), igual já fazia para "/api" desde a Sub-fase 25a.
+app.include_router(lotes.router, prefix="/leitor/api")
 
 
 @app.get("/saude")
 @app.get("/api/saude")
+@app.get("/leitor/api/saude")
 def saude():
     """Checagem simples de que o processo está de pé -- não toca em
     OCR/bases, só confirma que a API responde. Espelhada em /api/saude
-    pelo mesmo motivo do router acima (Sub-fase 25a)."""
+    pelo mesmo motivo do router acima (Sub-fase 25a) e em
+    /leitor/api/saude pelo mesmo motivo do ajuste de sub-path pós-Fase 25."""
     return {"status": "ok"}
 
 
@@ -173,6 +185,16 @@ if _DIST_INDEX.is_file():
     # na raiz do build (favicon.svg, icons.svg) são tratados pelo
     # catch-all abaixo, junto com o próprio index.html.
     app.mount("/assets", StaticFiles(directory=_DIST_DIR / "assets"), name="frontend-assets")
+    # Ajuste pontual pós-Fase 25 (sub-path /leitor, ver CLAUDE.md e
+    # saida/ajuste_subpath_leitor.md): MESMO diretório, montado também sob
+    # "/leitor/assets" -- é o caminho que o build feito com
+    # `VITE_BASE_PATH=/leitor/` referencia dentro do próprio index.html
+    # (`<script src="/leitor/assets/index-*.js">`). Um build padrão (sem a
+    # variável) nunca gera link para este caminho, então este mount fica
+    # simplesmente sem uso nesse caso -- inofensivo.
+    app.mount(
+        "/leitor/assets", StaticFiles(directory=_DIST_DIR / "assets"), name="frontend-assets-leitor"
+    )
 
     # Nomes que já são rotas de API reais (ou prefixos delas) -- usados
     # abaixo como DEFESA EM PROFUNDIDADE, não como o mecanismo principal
@@ -185,6 +207,19 @@ if _DIST_INDEX.is_file():
     # HTML como se fosse a resposta JSON esperada.
     _PRIMEIRO_SEGMENTO_RESERVADO = {"api", "lotes", "saude", "docs", "redoc", "openapi.json"}
 
+    def _sem_prefixo_leitor(caminho: str) -> str:
+        """Ajuste pontual pós-Fase 25 (sub-path /leitor): remove um único
+        segmento "leitor" inicial, se houver, antes do catch-all decidir o
+        que fazer. Não se sabe se o Cloudflare Tunnel da VPS já remove esse
+        prefixo antes de encaminhar para este processo -- esta função faz
+        "/leitor", "/leitor/", "/leitor/favicon.svg", "/leitor/lote/<id>"
+        e um "/leitor/api/<inexistente>" malformado se comportarem
+        EXATAMENTE como os equivalentes sem o prefixo, nos dois cenários."""
+        partes = caminho.split("/", 1)
+        if partes[0] == "leitor":
+            return partes[1] if len(partes) > 1 else ""
+        return caminho
+
     @app.get("/{caminho:path}")
     def servir_frontend(caminho: str):
         """
@@ -194,9 +229,13 @@ if _DIST_INDEX.is_file():
         `dist/`) -- devolve o arquivo; (2) qualquer outra coisa -- é uma
         rota do REACT ROUTER (`/lote/:id`, `/lote/:id/revisao`), que só o
         JAVASCRIPT carregado sabe resolver, então devolve sempre o MESMO
-        `index.html` (o padrão universal de "SPA fallback").
+        `index.html` (o padrão universal de "SPA fallback"). Um prefixo
+        "/leitor" inicial (ver `_sem_prefixo_leitor`, ajuste pós-Fase 25)
+        é removido antes desta decisão, então tudo abaixo vale igualmente
+        com ou sem esse prefixo.
         """
-        primeiro_segmento = caminho.split("/", 1)[0]
+        caminho_efetivo = _sem_prefixo_leitor(caminho)
+        primeiro_segmento = caminho_efetivo.split("/", 1)[0]
         if primeiro_segmento in _PRIMEIRO_SEGMENTO_RESERVADO:
             raise HTTPException(status_code=404, detail=f"Rota de API não encontrada: /{caminho}")
 
@@ -206,8 +245,8 @@ if _DIST_INDEX.is_file():
         # processo passou a escutar em 0.0.0.0 desde o ajuste do
         # Tailscale, então esta rota é alcançável pela rede, não só de
         # localhost).
-        candidato = (_DIST_DIR / caminho).resolve()
-        if caminho and candidato.is_file() and candidato.is_relative_to(_DIST_DIR.resolve()):
+        candidato = (_DIST_DIR / caminho_efetivo).resolve()
+        if caminho_efetivo and candidato.is_file() and candidato.is_relative_to(_DIST_DIR.resolve()):
             return FileResponse(candidato)
         return FileResponse(_DIST_INDEX)
 
