@@ -313,10 +313,10 @@ Visão consolidada das fases do projeto — concluídas, futuras e os princípio
 - Fase 24 — Web MVP (**4 sub-fases concluídas**: 24a núcleo compartilhado extraído para `pipeline.py`/`validacao/confirmacao.py`/`validacao/explicacao_revisao.py` e backend FastAPI em `web/backend/`; 24b frontend React/Tailwind em `web/frontend/` com o fluxo principal Seleção→Conferência→Processamento→Resultado; 24c tela de Revisão real com as três áreas (pendências/foto/formulário) e explicação humana da Fase 18 exposta via API, verificada com duas correções reais resolvendo pela interface (matrículas 27325 e 26319); 24d exportação com prova de fidelidade formal (planilha idêntica célula a célula), dois achados de polimento corrigidos (`StatusBadge` sem uso, erro "backend fora do ar" cru), animação de transição dos blobs entre telas (com `prefers-reduced-motion`), e verificação final rodando Tkinter real e Web real em paralelo contra o mesmo PDF real — resultado idêntico em tudo. Tkinter permanece CONGELADO e sem regressão, suíte 23/23 preservada do início ao fim; detalhes na seção Architecture e em `saida/avaliacao_fase24_web.md`)
 
 **Em andamento**
-- (nenhuma fase em andamento no momento)
+- Fase 25 — Empacotamento do app web em .exe portátil (**25a concluída** — processo único servindo o build de produção do frontend + janela nativa via `pywebview`, ainda rodando via `python`, não `.exe`; **25b pendente** — empacotamento de verdade com PyInstaller; detalhes na seção Architecture e em `saida/avaliacao_fase25_exe.md`)
 
 **Próximas**
-- (nenhuma fase definida no momento — a Fase 24 fechou o roadmap conhecido; a próxima fase, se houver, começa por uma medição/investigação, seguindo os princípios abaixo)
+- (nenhuma fase nova além da continuação da Fase 25 acima)
 
 **Princípios do roadmap**
 - Precisão antes de cobertura.
