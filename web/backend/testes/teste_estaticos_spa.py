@@ -46,11 +46,18 @@ def main():
     assert r.status_code == 200 and r.json() == {"status": "ok"}, r.text
     r = client.get("/api/saude")
     assert r.status_code == 200 and r.json() == {"status": "ok"}, r.text
+    r = client.get("/leitor/api/saude")
+    assert r.status_code == 200 and r.json() == {"status": "ok"}, r.text
     r = client.get("/lotes/nao-existe/status")
     assert r.status_code == 404 and "não encontrado" in r.json()["detail"]
     r = client.get("/api/lotes/nao-existe/status")
     assert r.status_code == 404 and "não encontrado" in r.json()["detail"]
-    print("  OK: /saude, /api/saude, /lotes/.../status e /api/lotes/.../status (dual-mount)")
+    r = client.get("/leitor/api/lotes/nao-existe/status")
+    assert r.status_code == 404 and "não encontrado" in r.json()["detail"]
+    print(
+        "  OK: /saude, /api/saude, /leitor/api/saude, /lotes/.../status, "
+        "/api/lotes/.../status e /leitor/api/lotes/.../status (triplo-mount)"
+    )
 
     if not (_DIST_DIR / "index.html").is_file():
         print(
@@ -104,6 +111,31 @@ def main():
     )
     assert "paddleocr" not in r.text.lower(), "path traversal vazou conteúdo de fora de dist/!"
     print("  OK: tentativa de escapar de dist/ cai no fallback do index.html, não vaza nada")
+
+    print("=== Bloco 7 (ajuste pós-Fase 25): sub-path /leitor se comporta como a raiz ===")
+    for rota in ("/leitor", "/leitor/", "/leitor/lote/abc123/revisao"):
+        r = client.get(rota)
+        assert r.status_code == 200, (rota, r.status_code)
+        assert r.text == corpo_index, f"{rota} devolveu HTML diferente do index.html"
+    r = client.get(f"/leitor/assets/{algum_css.name}")
+    assert r.status_code == 200 and "text/css" in r.headers["content-type"]
+    r = client.get("/leitor/favicon.svg")
+    assert r.status_code == 200 and "svg" in r.headers["content-type"]
+    for rota_invalida in ("/leitor/api/lotes/abc/rota-que-nao-existe",):
+        r = client.get(rota_invalida)
+        assert r.status_code == 404, f"{rota_invalida} deveria ser 404, veio {r.status_code}"
+        assert "application/json" in r.headers["content-type"], (
+            f"{rota_invalida} deveria devolver JSON de erro, não a página da SPA"
+        )
+    r = client.get("/leitor/assets/../../../../requirements.txt")
+    assert r.status_code == 200 and r.text == corpo_index, (
+        "tentativa de path traversal sob /leitor deveria cair no fallback do index.html"
+    )
+    assert "paddleocr" not in r.text.lower(), "path traversal sob /leitor vazou conteúdo de fora de dist/!"
+    print(
+        "  OK: /leitor, /leitor/, rotas do React Router, assets, favicon, 404 de API "
+        "malformada e defesa contra path traversal -- tudo idêntico à raiz"
+    )
 
     print("\nTESTE DE ESTÁTICOS/SPA (SUB-FASE 25a): TUDO OK (modo com build)")
 

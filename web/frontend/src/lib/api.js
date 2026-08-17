@@ -10,7 +10,15 @@
  * pode ser exportado, etc.) já veio pronta do backend.
  */
 
-const BASE = "/api";
+// Ajuste pontual pós-Fase 25 (deploy atrás de sub-path, ver CLAUDE.md e
+// saida/ajuste_subpath_leitor.md): a base da API é derivada de
+// `import.meta.env.BASE_URL` -- o valor que o Vite já preenche a partir do
+// `base` resolvido em vite.config.js (sempre "/" em dev; em produção "/"
+// por padrão, ou "/leitor/" quando o build da VPS roda com
+// `VITE_BASE_PATH=/leitor/`). Isto é o que faz `urlExportar`/
+// `urlImagemPagina`, que já usam `${BASE}/...`, herdarem o prefixo certo
+// sem precisar de nenhuma mudança própria.
+const BASE = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/api`;
 
 export class ApiError extends Error {
   constructor(status, detail) {
