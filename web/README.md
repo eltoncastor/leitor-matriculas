@@ -109,8 +109,7 @@ internet pública. Ver o docstring de `web/backend/main.py` e
 
 Retomada da ideia de portabilidade (Fase 25, ver CLAUDE.md) — desta vez mirando a versão
 WEB, não o Tkinter. Um processo Python SÓ, com uma janela nativa (`pywebview`) no lugar
-do navegador — sem precisar do `vite dev` rodando à parte. Ainda não é um `.exe`
-(isso é a Sub-fase 25b, empacotamento com PyInstaller); continua rodando via `python`.
+do navegador — sem precisar do `vite dev` rodando à parte.
 
 ```powershell
 # 1. Build de produção do frontend (uma vez, ou de novo a cada mudança no frontend):
@@ -129,8 +128,37 @@ o script avisa e sai, em vez de abrir uma janela mostrando só a API pura.
 
 Este modo é independente do modo de desenvolvimento (`vite dev` + `python web\backend\main.py`
 em dois terminais, seção acima) e do acesso remoto via Tailscale — os três continuam
-existindo e funcionando lado a lado. Ver `saida/avaliacao_fase25_exe.md` para o detalhe
-completo (decisão sobre CORS, tamanho de baseline medido, limitações).
+existindo e funcionando lado a lado.
+
+## Empacotamento em .exe portátil (Sub-fase 25b — fecha a Fase 25)
+
+Gera uma pasta portátil (`--onedir`, ver justificativa medida em
+`saida/avaliacao_fase25_exe.md`) com `LeitorDeMatriculas.exe` + tudo que ele precisa —
+copia a pasta inteira pra qualquer Windows e roda, sem instalar Python/Node.
+
+```powershell
+# 1. Instalar as ferramentas de build (só quem for GERAR o .exe precisa disto --
+#    nunca quem só vai RODAR o .exe já pronto):
+pip install pyinstaller pyinstaller-hooks-contrib
+
+# 2. Build de produção do frontend (mesmo passo do modo desktop acima):
+cd web\frontend; npm run build; cd ..\..
+
+# 3. Empacotar:
+pyinstaller web\desktop_app.spec --distpath dist_exe --workpath build_exe --noconfirm
+
+# 4. Copiar as planilhas de referência para dentro da pasta gerada (ficam FORA do
+#    .exe de propósito -- editáveis sem reempacotar, ver web/backend/estado.py):
+copy dados\*.xlsx dist_exe\LeitorDeMatriculas\dados\
+
+# 5. Rodar:
+dist_exe\LeitorDeMatriculas\LeitorDeMatriculas.exe
+```
+
+`dist_exe/`/`build_exe/` são gerados sob demanda (gitignored) — o `.spec` é a receita
+versionada. Ver `saida/avaliacao_fase25_exe.md` para as decisões medidas (`--onedir` vs
+`--onefile`, o que foi investigado para reduzir tamanho, os problemas reais resolvidos
+no `.spec`) e o tamanho final do pacote.
 
 ### Estrutura
 

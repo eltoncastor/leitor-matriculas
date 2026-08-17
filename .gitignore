@@ -47,104 +47,6 @@ entrada/*
 dados/*.xlsx
 
 # Configuração local do Claude
-.claude/settings.local.json# Python
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Ambientes virtuais
-.venv/
-venv/
-env/
-
-# Testes / cache
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# IDE
-.vscode/
-.idea/
-
-# Sistema operacional
-.DS_Store
-Thumbs.db
-
-# Arquivos temporários
-*.tmp
-*.temp
-
-# Logs
-*.log
-
-# Resultados gerados
-saida/*
-!saida/.gitkeep
-
-# Arquivos de teste locais
-exemplos/
-teste.jpg
-teste - Copy.jpg
-resultado_ocr.csv
-estrutura.txt
-
-# Entradas reais
-entrada/*
-!entrada/.gitkeep
-
-# Dados reais
-dados/*.xlsx
-
-# Configuração local do Claude
-.claude/settings.local.json# Python
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Ambientes virtuais
-.venv/
-venv/
-env/
-
-# Testes / cache
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# IDE
-.vscode/
-.idea/
-
-# Sistema operacional
-.DS_Store
-Thumbs.db
-
-# Arquivos temporários
-*.tmp
-*.temp
-
-# Logs
-*.log
-
-# Resultados gerados
-saida/*
-!saida/.gitkeep
-
-# Arquivos de teste locais
-exemplos/
-teste.jpg
-teste - Copy.jpg
-resultado_ocr.csv
-estrutura.txt
-
-# Entradas reais
-entrada/*
-!entrada/.gitkeep
-
-# Dados reais
-dados/*.xlsx
-
-# Configuração local do Claude
 .claude/settings.local.json
 
 # Historico de correcoes humanas (Fase 20): contem matriculas, nomes de
@@ -167,3 +69,10 @@ web/frontend/dist/
 # negocio -- fica fora de dados/ de proposito (ver ui/preferencias.py).
 # Nao versionado pelo mesmo motivo que qualquer outro estado por maquina.
 preferencias_ui.json
+
+# Empacotamento .exe (Sub-fase 25b): saída gerada pelo PyInstaller a partir
+# de web/desktop_app.spec -- binário grande, reproduzível a qualquer momento
+# rodando o build de novo (ver web/README.md), nunca deve ser versionado.
+# O `.spec` em si FICA versionado (é a receita do build, não o resultado).
+/build_exe/
+/dist_exe/

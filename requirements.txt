@@ -46,3 +46,13 @@ python-multipart>=0.0.9
 # Microsoft, fora do controle deste projeto) — não embute um Chromium
 # próprio, ao contrário do Electron.
 pywebview>=6.0,<7.0
+
+# Sub-fase 25b (empacotamento .exe portátil) — só para quem for GERAR o
+# .exe (`pyinstaller web/desktop_app.spec ...`), nunca para rodar o app
+# (o .exe final embute tudo; quem só usa o .exe não precisa de Python
+# nem deste requirements.txt). `pyinstaller-hooks-contrib` cobre cv2/
+# openpyxl/shapely/skimage/uvicorn/webview automaticamente -- o `.spec`
+# só precisa declarar paddle/paddleocr/paddlex/pymupdf manualmente (sem
+# hook pronto, ver comentário no próprio `.spec`).
+pyinstaller>=6.0,<7.0
+pyinstaller-hooks-contrib>=2026.0

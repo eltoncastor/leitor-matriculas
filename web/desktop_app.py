@@ -30,17 +30,38 @@ Rodar (a partir da raiz do projeto, com o venv ativo):
 import os
 import sys
 
-_RAIZ_PROJETO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# Mesmo raciocínio de `web/backend/main.py`: rodando como `python
-# web/desktop_app.py`, o Python só coloca `web/` no sys.path
-# automaticamente (o diretório do próprio script) -- sem a RAIZ aqui,
-# `import web.backend.main` abaixo falharia. `src/` também é inserido
-# aqui, embora `web.backend.main` já faça o mesmo ao ser importado --
-# inofensivo repetir (sys.path aceita entradas duplicadas sem efeito
-# colateral), e deixa este arquivo correto por si só, sem depender da
-# ordem de import.
-sys.path.insert(0, _RAIZ_PROJETO)
-sys.path.insert(0, os.path.join(_RAIZ_PROJETO, "src"))
+if getattr(sys, "frozen", False):
+    # Sub-fase 25b (empacotamento com PyInstaller) -- achado real, não
+    # hipotético: o SCRIPT DE ENTRADA (este arquivo) recebe um `__file__`
+    # congelado que aponta para a pasta do PRÓPRIO `.exe`
+    # (`dist_exe/LeitorDeMatriculas/desktop_app.py`, um caminho sintético
+    # que nem chega a existir como arquivo real) -- DIFERENTE de como um
+    # módulo IMPORTADO (como `web.backend.main`, importado abaixo) tem seu
+    # `__file__` resolvido, que preserva o caminho do pacote dentro de
+    # `sys._MEIPASS` (`_internal/web/backend/main.pyc`). A primeira versão
+    # deste arquivo usava `os.path.dirname(__file__)` sem essa distinção e
+    # calculava a pasta ERRADA (a pasta do `.exe`, sem o `_internal` no
+    # meio) -- resultado: "build de produção não encontrado" mesmo com o
+    # build de verdade presente, só em local diferente do calculado.
+    # `sys._MEIPASS` é a forma OFICIAL e documentada do PyInstaller para
+    # um app congelado achar os próprios dados empacotados -- correta nos
+    # dois modos (`--onedir` E `--onefile`), ao contrário de calcular a
+    # partir de `__file__`.
+    _RAIZ_PROJETO = sys._MEIPASS
+else:
+    _RAIZ_PROJETO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    # Mesmo raciocínio de `web/backend/main.py`: rodando como `python
+    # web/desktop_app.py`, o Python só coloca `web/` no sys.path
+    # automaticamente (o diretório do próprio script) -- sem a RAIZ aqui,
+    # `import web.backend.main` abaixo falharia. `src/` também é inserido
+    # aqui, embora `web.backend.main` já faça o mesmo ao ser importado --
+    # inofensivo repetir (sys.path aceita entradas duplicadas sem efeito
+    # colateral), e deixa este arquivo correto por si só, sem depender da
+    # ordem de import. Fora de um build congelado só -- dentro de um
+    # `.exe`, os módulos já vêm resolvidos pelo importer do PyInstaller,
+    # manipular `sys.path` não tem efeito nem faz falta.
+    sys.path.insert(0, _RAIZ_PROJETO)
+    sys.path.insert(0, os.path.join(_RAIZ_PROJETO, "src"))
 
 import pathlib  # noqa: E402
 import threading  # noqa: E402
@@ -119,13 +140,26 @@ def main() -> int:
         print(f"ERRO: o servidor não respondeu em http://{HOST}:{PORTA}/saude a tempo.", file=sys.stderr)
         return 1
 
+    # Sub-fase 25b -- achado medido, não hipotético: mesmo com o servidor
+    # já respondendo (`_esperar_servidor_pronto` acima), a criação da
+    # janela mostra uma tela BRANCA por ~4s antes do primeiro paint de
+    # verdade -- é o próprio WebView2 inicializando/carregando a página,
+    # não o servidor (o servidor já estava pronto quando a janela é
+    # criada). `hidden=True` + revelar só no evento `loaded` (disparado
+    # quando a página termina de carregar) troca "janela branca por
+    # alguns segundos" por "nada aparece até estar pronto para aparecer" --
+    # mais correto que sincronizar de novo com `/saude` (que já passou) ou
+    # não fazer nada (a tela branca, medida, é desconfortável o bastante
+    # pra justificar isto sem virar uma tela de carregamento elaborada).
     janela = webview.create_window(
         "Leitor de Matrículas",
         f"http://{HOST}:{PORTA}/",
         width=1440,
         height=900,
         min_size=(1024, 700),
+        hidden=True,
     )
+    janela.events.loaded += janela.show
 
     def _ao_fechar():
         # Sinaliza o `uvicorn.Server` para encerrar o próprio loop de
@@ -145,4 +179,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Sub-fase 25b (empacotamento com PyInstaller): `freeze_support()` é
+    # inofensivo fora de um `.exe` congelado (vira um no-op) e evita um
+    # problema conhecido no Windows -- se QUALQUER dependência (paddle
+    # inclusive) usar `multiprocessing` internamente, um `.exe` congelado
+    # sem essa chamada pode reexecutar o programa inteiro do zero a cada
+    # subprocesso, em vez de só rodar o worker esperado. Chamado logo no
+    # início do bloco, antes de qualquer outra coisa, como a documentação
+    # do `multiprocessing` recomenda.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     sys.exit(main())

@@ -29,6 +29,7 @@ acompanha o progresso -- o equivalente, aqui, à fila+thread do Tkinter.
 import dataclasses
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -126,11 +127,43 @@ _ocr_engine = None
 _data_manager: Optional[DataManager] = None
 
 
+def _pasta_dados_ao_lado_do_executavel() -> Optional[str]:
+    """
+    Sub-fase 25b (empacotamento com PyInstaller): `DataManager()` sem
+    argumento resolve `dados/` a partir do PRÓPRIO `__file__` de
+    `data_manager.py`, três níveis acima (ver o docstring dele) -- isso
+    continua correto rodando `python web/backend/main.py` direto do
+    repositório, mas quebra (ou, pior, resolve para um lugar ERRADO sem
+    avisar) dentro de um `.exe` empacotado:
+
+      - em `--onedir`, o `__file__` sintético que o PyInstaller atribui ao
+        módulo congelado ainda aponta para dentro da PASTA do próprio
+        pacote (`sys._MEIPASS`, que em onedir É a pasta onde o `.exe`
+        está) -- então o cálculo "três níveis acima" até funcionaria por
+        acidente, mas depende de detalhe de implementação do PyInstaller,
+        não de nada garantido;
+      - em `--onefile`, `sys._MEIPASS` é uma pasta TEMPORÁRIA nova a cada
+        execução (`%TEMP%\\_MEIxxxxxx`) -- gravar/ler `dados/` ali seria
+        efetivamente `dados/` sumir a cada reinício, o oposto do pedido
+        desta sub-fase ("editável pelo usuário sem reempacotar").
+
+    A forma robusta e igual nos dois modos é `os.path.dirname(sys.
+    executable)` -- SEMPRE a pasta onde o `.exe` real está, nos dois casos
+    (nunca a pasta temporária de extração). Fora de um build congelado
+    (`sys.frozen` ausente -- o caso de sempre, rodando via `python`),
+    devolve `None` e `DataManager()` resolve exatamente como sempre
+    resolveu -- este ajuste é invisível fora do `.exe`.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), "dados")
+    return None
+
+
 def obter_data_manager() -> DataManager:
     """Instância única por processo -- ver docstring do módulo."""
     global _data_manager
     if _data_manager is None:
-        _data_manager = DataManager()
+        _data_manager = DataManager(pasta_dados=_pasta_dados_ao_lado_do_executavel())
     return _data_manager
 
 
