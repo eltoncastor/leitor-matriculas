@@ -1,8 +1,13 @@
 # Leitor de Matrículas Manuscritas
 
-Ferramenta desktop para Windows, desenvolvida em Python/Tkinter (com `ttkbootstrap` para o tema visual), que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
+Ferramenta para Windows que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
 
-O sistema utiliza OCR com PaddleOCR para reconhecer os dados manuscritos, valida as informações contra bases XLSX e envia automaticamente para revisão manual os casos que não podem ser confirmados com segurança.
+O sistema utiliza OCR com PaddleOCR para reconhecer os dados manuscritos, valida as informações contra bases XLSX e envia automaticamente para revisão manual os casos que não podem ser confirmados com segurança. Todo o núcleo — OCR, parser, validação, evidências, exportação — vive em `src/leitor_matriculas/` e é o mesmo em qualquer interface abaixo; nada é reescrito de uma para outra.
+
+### Duas interfaces, o mesmo núcleo
+
+* **Desktop (Tkinter)** — `python main.py`. A interface original do projeto; congelada desde a Fase 24 (recebe correções, não novas funcionalidades), mas totalmente funcional.
+* **Web** (`web/`) — React + Tailwind no navegador, FastAPI por trás, é a interface em desenvolvimento ativo hoje. Pode rodar como servidor local, como app desktop com janela nativa (`python web\desktop_app.py`), ou empacotada como um `.exe` portátil (sem instalar Python/Node) — ver `web/README.md` para todos os modos, incluindo acesso remoto e deploy atrás de um domínio compartilhado. Também suporta descarregar o OCR para um **Worker** separado (ex.: PC Windows do operador atendendo uma VPS), útil quando o servidor principal roda num ambiente pequeno demais para o PaddleOCR — ver a seção "Worker Windows" de `web/README.md`.
 
 ```text
 FOTO ou PDF
@@ -109,14 +114,16 @@ Quando o gestor não puder ser identificado com segurança, o registro é enviad
 
 ## Arquitetura atual
 
-O código-fonte fica em `src/leitor_matriculas/`, organizado por **responsabilidade**:
+O núcleo do sistema fica em `src/leitor_matriculas/`, organizado por **responsabilidade**, e é compartilhado por todas as interfaces:
 
 ```text
 leitor_matriculas/
-├── main.py                     ponto de entrada (python main.py)
+├── main.py                     ponto de entrada do desktop Tkinter (python main.py)
 │
 ├── src/
 │   └── leitor_matriculas/
+│       ├── pipeline.py         orquestra OCR → parser → validação para uma folha
+│       │                       (usado pelo Tkinter e pelo backend web -- ver abaixo)
 │       ├── ocr/                entrada visual
 │       │   ├── image_processor.py
 │       │   ├── engine.py
@@ -128,14 +135,29 @@ leitor_matriculas/
 │       ├── validacao/          classificação dos registros
 │       │   ├── regras.py
 │       │   ├── correspondencia_aproximada.py
-│       │   └── recuperacao_matricula.py
+│       │   ├── recuperacao_matricula.py
+│       │   ├── integridade.py
+│       │   ├── evidencias.py
+│       │   ├── confirmacao.py
+│       │   └── explicacao_revisao.py
 │       ├── dados/              bases XLSX de apoio
-│       │   └── data_manager.py
+│       │   ├── data_manager.py
+│       │   └── registro_correcoes.py
 │       ├── exportacao/         geração da saída
 │       │   ├── xlsx_exporter.py
 │       │   └── csv_exporter.py
 │       └── ui/                 interface Tkinter
-│           └── app.py
+│           ├── app.py
+│           ├── estilos.py
+│           ├── mensagens.py
+│           └── preferencias.py
+│
+├── web/                        interface Web (React + FastAPI) -- ver web/README.md
+│   ├── backend/                 API que chama o mesmo pipeline.py acima
+│   ├── frontend/                React + Tailwind (Vite)
+│   └── desktop_app.py           janela nativa (pywebview) sobre o mesmo backend
+│
+├── worker/                     Worker de OCR remoto (opcional) -- ver web/README.md
 │
 ├── dados/                      bases reais (locais, fora do Git)
 │   ├── LEIA-ME.txt
@@ -145,14 +167,15 @@ leitor_matriculas/
 │
 ├── entrada/                    fotos/PDFs reais (locais, fora do Git)
 ├── saida/                      planilhas geradas (locais, fora do Git)
-├── teste/
+├── teste/                      testes do núcleo e do Tkinter
 ├── requirements.txt
-└── README.md
+├── README.md                    este arquivo
+└── web/README.md                interface Web, Worker, empacotamento .exe
 ```
 
-A dependência é de mão única — `ocr → parsing → validacao → exportacao`, com `ui` por cima de todos. Nenhum módulo de baixo importa um de cima, o que mantém o grafo acíclico.
+A dependência dentro de `src/leitor_matriculas/` é de mão única — `ocr → parsing → validacao → exportacao`, com `pipeline.py` orquestrando essa cadeia e `ui`/`web/backend` cada um coordenando por cima dela à sua maneira. Nenhum módulo de baixo importa um de cima, o que mantém o grafo acíclico.
 
-O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acrescenta `src/` ao `sys.path` antes de importar o pacote.
+O projeto roda direto do diretório, sem instalação via `pip`: `main.py` acrescenta `src/` ao `sys.path` antes de importar o pacote (o backend web faz o equivalente).
 
 ---
 
@@ -160,7 +183,8 @@ O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acr
 
 | Módulo                                            | Responsabilidade                                         |
 | ------------------------------------------------- | -------------------------------------------------------- |
-| `main.py`                                          | Ponto de entrada                                         |
+| `main.py`                                          | Ponto de entrada do desktop Tkinter                      |
+| `pipeline.py`                                      | Roda OCR → parser → validação para uma folha; usado pelo Tkinter e pelo backend web |
 | `ui/app.py`                                        | Interface gráfica (abas Registros/Revisão/Avisos) e coordenação do processamento |
 | `ocr/engine.py`                                    | Inicialização e execução do PaddleOCR                    |
 | `ocr/image_processor.py`                           | Pré-processamento das imagens                            |
@@ -169,13 +193,18 @@ O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acr
 | `parsing/tempo_parser.py`                          | Interpretação e validação de Data/Hora                   |
 | `parsing/contexto_lote.py`                         | Contexto do lote (ano das datas já lidas)                |
 | `dados/data_manager.py`                            | Carregamento das bases XLSX                              |
+| `dados/registro_correcoes.py`                      | Registra correções manuais para consulta futura (não influencia decisões automáticas) |
 | `validacao/correspondencia_aproximada.py`          | Correspondência aproximada controlada                    |
 | `validacao/recuperacao_matricula.py`               | Recuperação da matrícula para dígitos                    |
 | `validacao/regras.py`                              | Classificação dos registros                              |
+| `validacao/integridade.py`                         | Detecta campo lido pelo OCR e perdido na associação (evita `CONFIRMADO` com dado perdido) |
+| `validacao/evidencias.py`                          | Registra por que cada valor foi aceito, corrigido ou recusado (sem pontuação/score) |
+| `validacao/confirmacao.py`                         | Decisão de confirmação manual, compartilhada entre Tkinter e Web |
+| `validacao/explicacao_revisao.py`                  | Traduz a evidência estruturada para linguagem de operador na aba/tela de Revisão |
 | `exportacao/xlsx_exporter.py`                      | Geração da planilha XLSX                                 |
 | `exportacao/csv_exporter.py`                       | Exportação CSV legada (não ligada à interface)           |
 
-Os caminhos acima são relativos a `src/leitor_matriculas/`.
+Os caminhos acima são relativos a `src/leitor_matriculas/`. Os módulos de `web/` e `worker/` estão documentados em `web/README.md`.
 
 ---
 
@@ -241,7 +270,7 @@ O campo `Motivo` de um registro `CONFIRMADO` sempre contém um desses valores �
 
 ## Instalação
 
-Windows + PowerShell:
+Windows + PowerShell (desktop Tkinter — para a interface Web, ver `web/README.md`):
 
 ```powershell
 cd leitor_matriculas
@@ -255,6 +284,8 @@ Na primeira execução, o PaddleOCR pode baixar os modelos necessários.
 
 Após os modelos estarem disponíveis, o processamento pode funcionar localmente sem depender de serviços externos.
 
+Também existe um `.exe` portátil da interface Web, que não precisa de Python nem Node instalados — ver "Empacotamento em .exe portátil" em `web/README.md`.
+
 ---
 
 ## Executar
@@ -262,6 +293,8 @@ Após os modelos estarem disponíveis, o processamento pode funcionar localmente
 ```powershell
 python main.py
 ```
+
+Isto abre a interface Tkinter, descrita nesta seção. Para a interface Web (navegador, app desktop com janela nativa, ou o `.exe`), ver `web/README.md`.
 
 ### Selecionar imagem
 
@@ -533,9 +566,7 @@ Não foram feitas otimizações de velocidade que comprometam a precisão do OCR
 
 ## Testes
 
-A suíte pode ser executada pelos arquivos individuais em `teste/`.
-
-Exemplos:
+Não há um único test runner: cada arquivo em `teste/` é um script independente. Exemplos:
 
 ```powershell
 python teste\teste_ocr.py <foto>
@@ -555,9 +586,18 @@ python teste\teste_lote_operacional.py
 python teste\teste_normalizacao_ocr.py
 python teste\teste_normalizacao_motivo_hora.py
 python teste\teste_recuperacao_contextual.py
+python teste\teste_integridade_captura.py
+python teste\teste_pdf_robustez.py
+python teste\teste_resolucao_ocr.py
+python teste\teste_evidencias.py
+python teste\teste_registro_correcoes.py
+python teste\teste_alternar_tema.py
+python teste\teste_estilos.py
 ```
 
 Todas as suítes acima estão aprovadas no ciclo atual. Com exceção de `teste_ocr.py`, que exige uma foto real como argumento, nenhuma depende de PaddleOCR ou das planilhas reais — as bases usadas são fixtures sintéticas.
+
+A interface Web e o Worker têm suas próprias suítes, também sem um runner único: `web\backend\testes\*.py` (API, persistência, protocolo de Worker) e `worker\testes\*.py` (cliente HTTP do Worker), além dos testes JS do frontend (`cd web\frontend; npm run test`). Ver `web/README.md` para a lista completa e o que cada um cobre.
 
 `teste_recuperacao_contextual.py` cobre especificamente as normalizações e recuperações descritas acima: família `HORÁRIO NEGADO` e preservação dos outros seis motivos, leitura do código do gestor, contexto do lote (ano completado, ano divergente, lote que atravessa a virada do ano), horas deformadas, matrícula só com dígitos, e a regra de que normalizar um campo não confirma o registro sozinho.
 
@@ -703,7 +743,7 @@ O repositório contém apenas o código, testes e documentação necessários ao
 
 A reorganização arquitetural já foi concluída: o código está separado por responsabilidade em `src/leitor_matriculas/`, com dependência de mão única e grafo acíclico, sem alteração de comportamento funcional.
 
-Percurso até aqui:
+Percurso até aqui, em ordem:
 
 ```text
 MVP estável
@@ -714,13 +754,23 @@ preparação para operação em lote real
     ↓
 recuperação contextual de OCR
     ↓
-nova evolução funcional
+motor de evidências + revisão inteligente
+    ↓
+performance e aprendizado com correções humanas (medidos; poucas adoções — ver abaixo)
+    ↓
+revolução de UX/UI e redesign visual (interface Tkinter)
+    ↓
+Web MVP (React + FastAPI, mesmo núcleo do Tkinter)
+    ↓
+empacotamento em .exe portátil
+    ↓
+OCR Worker distribuído (VPS + Worker Windows) — em andamento
 ```
 
-Cada evolução funcional preserva os comportamentos já validados e mantém a suíte de testes como mecanismo de proteção contra regressões.
+Cada evolução preserva os comportamentos já validados contra o mesmo conjunto de folhas reais e mantém a suíte de testes como mecanismo de proteção contra regressões. Boa parte do que foi **investigado e propositalmente não adotado** (extração por ROI/template, confirmação automática por contexto de lote, redução de limiares de correspondência aproximada, aprendizado automático a partir de correções manuais, paralelismo de OCR) tem tanto peso na arquitetura atual quanto o que foi adotado — cada decisão veio de medição contra fotos reais, não de preferência. O histórico completo, fase a fase, com os números que sustentaram cada decisão, está na skill `.claude/skills/historico-do-projeto/` deste repositório (para quem usa Claude Code) ou em `CLAUDE.md`/`saida/*.md`.
 
-Direções possíveis a partir daqui, sem compromisso de prazo:
+Direções em andamento ou possíveis a partir daqui, sem compromisso de prazo:
 
-* desempenho do OCR, que hoje concentra a quase totalidade do tempo de processamento;
-* extração por ROI/template da folha, avaliada e **não adotada** — o experimento com fotos reais mostrou substituição incorreta de dígito sem ganho compensatório, e o pipeline atual continua sendo OCR da página inteira + geometria. Uma nova tentativa exigiria política de aceitação mais forte e uma amostra maior de folhas;
+* concluir a distribuição do OCR Worker (frontend adaptado ao modelo de fila/Job, deploy da VPS documentado);
+* desempenho do OCR em si (GPU ou modelo mais rápido), únicas alternativas que restaram depois de medir que o entorno do OCR (paralelismo, cache, I/O) não tem folga real para otimizar;
 * ampliação das recuperações contextuais, sempre com o mesmo critério: precisão antes de cobertura.
