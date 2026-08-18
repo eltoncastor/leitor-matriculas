@@ -36,7 +36,9 @@ Rodar (a partir da raiz do projeto, com o venv ativo):
 """
 import copy
 import os
+import shutil
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
@@ -45,8 +47,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from fastapi.testclient import TestClient
 
 from leitor_matriculas.validacao.confirmacao import confirmar_revisao_manual
-from web.backend import estado
+from web.backend import armazenamento, estado
 from web.backend.main import app
+
+# Fase 26a: o armazenamento virou durável -- rodar a suíte não pode
+# escrever no armazenamento real do operador (mesmo cuidado da Fase 20 com
+# o histórico de correções).
+_RAIZ_ARMAZENAMENTO_TESTE = tempfile.mkdtemp(prefix="armazenamento_teste_real_")
+armazenamento.definir_raiz(_RAIZ_ARMAZENAMENTO_TESTE)
 
 CAMINHO_PDF = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "entrada", "pdf", "teste.pdf"
@@ -321,4 +329,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        shutil.rmtree(_RAIZ_ARMAZENAMENTO_TESTE, ignore_errors=True)

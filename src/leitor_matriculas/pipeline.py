@@ -27,7 +27,13 @@ web isolar UMA folha ruim sem abortar o lote inteiro.
 """
 import logging
 
-from leitor_matriculas.ocr.image_processor import preprocess_image
+# Fase 26a: `preprocess_image` NÃO é importado aqui no topo de propósito --
+# `ocr/image_processor.py` importa OpenCV, e este módulo é importado
+# INTEIRO pela VPS só para chamar `montar_registro_exportacao` (a metade
+# leve do pipeline, que consulta as planilhas de referência). A metade
+# pesada (`processar_uma_pagina`) só roda no Worker. O import fica dentro
+# da função que realmente pré-processa; ver o comentário equivalente em
+# `ocr/engine.py`.
 from leitor_matriculas.ocr.engine import normalizar_matricula
 from leitor_matriculas.parsing.registro_parser import CampoOcr, parse_registros
 from leitor_matriculas.parsing.tempo_parser import tentar_separar_data_hora_mesclada
@@ -106,6 +112,9 @@ def processar_uma_pagina(imagem_bgr, ocr_engine, informar_etapa=None):
 
     _informar("Preparando a imagem da folha")
     try:
+        # Import tardio -- ver comentário no topo do módulo (Fase 26a).
+        from leitor_matriculas.ocr.image_processor import preprocess_image
+
         imagem_processada = preprocess_image(imagem_bgr)
     except Exception as exc:
         return None, [], f"Erro no pré-processamento: {exc}"

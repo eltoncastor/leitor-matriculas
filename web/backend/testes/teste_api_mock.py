@@ -34,7 +34,7 @@ import pymupdf as fitz
 from fastapi.testclient import TestClient
 
 from leitor_matriculas.ocr.engine import OCRResult
-from web.backend import estado
+from web.backend import armazenamento, estado
 from web.backend.main import app
 
 
@@ -80,13 +80,29 @@ RESULTADOS_OCR = _cabecalho() \
     + _linha(70, 90, "23.04.2026", "11:10", "Beltrano", "99999", "RH", "ADM", "Gestor Y", conf_mat=0.5)
 
 
+# Fase 26a: o armazenamento passou a ser DURÁVEL (antes os lotes viviam só
+# em memória e os uploads em `tempfile`, recolhidos pelo sistema
+# operacional). Rodar a suíte não pode escrever no armazenamento real do
+# operador nem deixar lixo no repositório -- mesmo cuidado que a Fase 20 já
+# tomou com o histórico de correções, redirecionando `dados/` para um
+# arquivo temporário.
+_RAIZ_ARMAZENAMENTO_TESTE = tempfile.mkdtemp(prefix="armazenamento_teste_")
+armazenamento.definir_raiz(_RAIZ_ARMAZENAMENTO_TESTE)
+
+
 def _resetar_estado_global():
     """Cada teste roda contra o mesmo processo/`app` (TestClient não sobe
     servidor à parte) -- os lotes de um teste não podem vazar para o
     próximo. Isto NÃO é o que a Fase 24 pediu para evitar ("estado global
     solto") -- é só limpeza ENTRE testes deste arquivo; a API em si
-    continua resolvendo tudo por `lote_id`."""
+    continua resolvendo tudo por `lote_id`.
+
+    Fase 26a: limpar só o dicionário em memória deixou de bastar -- um
+    lote ausente de `_lotes` agora é RECUPERADO do disco por
+    `obter_lote`, então um teste enxergaria os lotes do anterior."""
     estado._lotes.clear()
+    for lote_id in armazenamento.listar_lotes():
+        armazenamento.remover_lote(lote_id)
 
 
 def _preparar_imagem_valida(pasta, nome="folha.jpg"):

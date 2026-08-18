@@ -45,7 +45,34 @@ python web\backend\testes\teste_api_mock.py
 # desde a Fase 9 (entrada\pdf\teste.pdf) -- roda antes de fechar uma
 # sub-fase, não a cada alteração:
 python web\backend\testes\teste_api_lote_real.py
+
+# Fase 26a -- Job, persistência e ordem de chegada das páginas (rápido, sem OCR):
+python web\backend\testes\teste_job_persistencia.py
 ```
+
+Todos redirecionam o armazenamento para uma pasta temporária: rodar a suíte nunca escreve no
+armazenamento real do operador nem deixa lixo no repositório.
+
+## Modo de operação e armazenamento (Fase 26a)
+
+A partir da Fase 26 o backend pode rodar o OCR ele mesmo ou delegá-lo a um **Worker** (um processo
+separado, tipicamente no PC Windows do operador — ver `saida/auditoria_fase26_ocr_worker.md`).
+Quem decide isso é uma variável de ambiente:
+
+| Variável | Padrão | Para que serve |
+|---|---|---|
+| `LEITOR_MODO` | `local` | `local`: este processo roda o OCR (modo desktop, `.exe` e desenvolvimento). `servidor`: este processo **não** roda OCR — os lotes ficam aguardando um Worker. É o modo da VPS. |
+| `LEITOR_ARMAZENAMENTO` | `<raiz>/armazenamento` | Onde ficam os lotes (arquivos enviados, resultado de OCR por página, fotos das folhas, planilha gerada). Na VPS, aponte para um caminho que sobreviva ao deploy. |
+
+O padrão é `local` de propósito: quem não configurar nada tem o comportamento de sempre, e um erro
+de configuração na VPS resulta em "a máquina errada trabalhou", nunca em "o lote sumiu".
+
+**O armazenamento passou a ser durável.** Antes da Fase 26 tudo vivia em memória e os uploads iam
+para `tempfile` (recolhidos pelo sistema operacional) — um reinício do backend apagava lotes
+inteiros em silêncio, com o `status` congelado em "processando". Agora um lote sobrevive ao
+reinício, e um lote que estava sendo processado volta para a fila **sem refazer o OCR das páginas
+já lidas**. Em troca, a limpeza virou explícita: lotes com mais de 30 dias são removidos na
+inicialização. A pasta é gitignored (contém matrículas e nomes reais) e recriada sozinha.
 
 ## Frontend (Fase 24b)
 

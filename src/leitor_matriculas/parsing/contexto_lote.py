@@ -78,6 +78,36 @@ class ContextoLote:
         self._anos = {}  # ano -> quantas datas completas o comprovam
 
     # ------------------------------------------------------------------
+    # Serialização (Fase 26a). Existe por um motivo concreto: a revisão
+    # manual (`POST /lotes/{id}/registros/{indice}/confirmar`) reclassifica
+    # o registro passando ESTE contexto, e isso acontece DEPOIS do lote
+    # concluído -- muitas vezes bem depois. Sem persistir o contexto, um
+    # reinício do backend faria a mesma confirmação decidir diferente
+    # (uma data sem ano deixaria de poder ser completada), o que é
+    # exatamente o tipo de divergência silenciosa que o projeto evita.
+    #
+    # O estado inteiro é `{ano: contagem}`. Não há nada derivado a
+    # recalcular: `ano_do_lote()` é função pura desse dicionário.
+    def como_dicionario(self) -> dict:
+        # Chaves viram texto no JSON; devolvemos int aqui e reconvertemos
+        # na volta, para o formato não depender de quem serializa.
+        return {"anos": {str(ano): quantidade for ano, quantidade in self._anos.items()}}
+
+    @classmethod
+    def de_dicionario(cls, dados: Optional[dict]) -> "ContextoLote":
+        contexto = cls()
+        for ano, quantidade in ((dados or {}).get("anos") or {}).items():
+            try:
+                contexto._anos[int(ano)] = int(quantidade)
+            except (TypeError, ValueError):
+                # Entrada corrompida no arquivo de estado: ignorar aquele
+                # ano é mais seguro que abortar o lote inteiro -- o efeito
+                # máximo é o contexto ficar mais fraco (menos recuperação),
+                # nunca eleger um ano errado.
+                continue
+        return contexto
+
+    # ------------------------------------------------------------------
     def registrar_data(self, texto_data: Optional[str]) -> None:
         """
         Alimenta o contexto com uma data lida na folha. Só conta se ela

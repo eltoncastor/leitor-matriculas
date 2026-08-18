@@ -90,6 +90,7 @@ _RAIZ_PROJETO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 sys.path.insert(0, os.path.join(_RAIZ_PROJETO, "src"))
 sys.path.insert(0, _RAIZ_PROJETO)
 
+import logging  # noqa: E402
 import pathlib  # noqa: E402
 
 from fastapi import FastAPI, HTTPException  # noqa: E402  (precisa vir depois do sys.path)
@@ -97,6 +98,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
+from web.backend import config, estado  # noqa: E402
 from web.backend.rotas import lotes  # noqa: E402
 
 app = FastAPI(
@@ -128,6 +130,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def _recuperar_lotes_persistidos():
+    """
+    Fase 26a. Duas coisas que o backend nunca fez ao subir:
+
+      * RETENÇÃO -- até a Fase 25 os uploads iam para `tempfile.mkdtemp()`
+        e quem os recolhia era o sistema operacional. Numa pasta durável
+        essa rede de segurança não existe mais, então a limpeza virou
+        responsabilidade explícita;
+      * RECUPERAÇÃO -- um lote que estava sendo processado quando o
+        processo morreu ficava com o `status` congelado em "processando"
+        para sempre, sem nenhuma forma de retomar. Agora ele volta para a
+        fila, e as páginas cujo OCR já estava gravado NÃO são refeitas.
+
+    Nunca levanta: uma falha aqui não pode impedir o servidor de subir.
+    """
+    resumo = estado.recuperar_lotes_do_disco()
+    logging.info(
+        "Armazenamento: %s lote(s) recuperado(s), %s reenfileirado(s), %s removido(s) por retenção. Modo: %s",
+        resumo.get("recuperados"), resumo.get("reenfileirados"), resumo.get("removidos"), config.modo(),
+    )
+
 
 app.include_router(lotes.router)
 # Sub-fase 25a: MESMO router, montado TAMBÉM sob "/api" -- é o prefixo que

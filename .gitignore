@@ -70,6 +70,17 @@ web/frontend/dist/
 # Nao versionado pelo mesmo motivo que qualquer outro estado por maquina.
 preferencias_ui.json
 
+# Armazenamento dos lotes (Fase 26a): arquivos enviados pelo operador,
+# resultado de OCR por pagina, fotos das folhas e a planilha gerada.
+# Contem matriculas e nomes reais, pelo mesmo motivo que os XLSX acima --
+# e e conteudo de execucao, nunca codigo. A pasta e recriada sozinha.
+/armazenamento/
+
+# Configuracao local (Fase 26a): o .env carrega o token do Worker e o
+# endereco da VPS. NUNCA versionado -- o que fica no repositorio e o
+# .env.example, sem nenhum segredo real.
+.env
+
 # Empacotamento .exe (Sub-fase 25b): saída gerada pelo PyInstaller a partir
 # de web/desktop_app.spec -- binário grande, reproduzível a qualquer momento
 # rodando o build de novo (ver web/README.md), nunca deve ser versionado.

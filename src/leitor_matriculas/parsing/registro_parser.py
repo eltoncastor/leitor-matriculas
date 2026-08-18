@@ -82,6 +82,25 @@ class CampoOcr:
     def de_ocr_result(cls, resultado: OCRResult) -> "CampoOcr":
         return cls(texto=resultado.texto_original, confianca=resultado.confianca, box=resultado.box)
 
+    # -- Serialização (Fase 26a) ------------------------------------------
+    # Só existe para o `CampoOcr` atravessar a rede entre o Worker (que roda
+    # o OCR) e a VPS (que classifica). NÃO normaliza, NÃO valida e NÃO
+    # completa nada: o que entra é exatamente o que sai. O `box` é
+    # reconstruído como `list` porque JSON não tem tupla, e `confianca`/
+    # `box` podem ser `None` legitimamente (motor que não informa posição).
+
+    def como_dicionario(self) -> Dict:
+        return {"texto": self.texto, "confianca": self.confianca, "box": self.box}
+
+    @classmethod
+    def de_dicionario(cls, dados: Dict) -> "CampoOcr":
+        box = dados.get("box")
+        return cls(
+            texto=dados.get("texto", ""),
+            confianca=dados.get("confianca"),
+            box=list(box) if box is not None else None,
+        )
+
 
 # Nomes de campo que o parser tenta identificar via cabeçalho da tabela.
 #
@@ -122,6 +141,42 @@ class Registro:
     def campos_faltando(self) -> List[str]:
         """Quais dos campos conhecidos não foram identificados nesta linha."""
         return [c for c in CAMPOS_TODOS if c not in self.campos]
+
+    # -- Serialização (Fase 26a) ------------------------------------------
+    # O `Registro` é o que o Worker devolve para a VPS: o OCR e o parser
+    # espacial rodam lá, a classificação contra as planilhas de referência
+    # roda cá. Ida e volta sem perda -- `completo` e `campos_faltando`
+    # continuam funcionando porque `campos` volta como `CampoOcr` de
+    # verdade, não como dict (`montar_registro_exportacao` acessa
+    # `registro.campos[...].texto` e `registro.completo`).
+    #
+    # Não há nada a versionar aqui: as duas pontas saem do mesmo
+    # repositório, na mesma versão. Se algum dia divergirem, o campo de
+    # versão pertence ao protocolo do Worker, não a esta dataclass.
+
+    def como_dicionario(self) -> Dict:
+        return {
+            "indice": self.indice,
+            "campos": {nome: campo.como_dicionario() for nome, campo in self.campos.items()},
+            "nao_associados": [campo.como_dicionario() for campo in self.nao_associados],
+            "y_min": self.y_min,
+            "y_max": self.y_max,
+        }
+
+    @classmethod
+    def de_dicionario(cls, dados: Dict) -> "Registro":
+        return cls(
+            indice=dados.get("indice", 0),
+            campos={
+                nome: CampoOcr.de_dicionario(campo)
+                for nome, campo in (dados.get("campos") or {}).items()
+            },
+            nao_associados=[
+                CampoOcr.de_dicionario(campo) for campo in (dados.get("nao_associados") or [])
+            ],
+            y_min=dados.get("y_min", 0),
+            y_max=dados.get("y_max", 0),
+        )
 
 
 @dataclass

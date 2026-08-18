@@ -11,7 +11,6 @@ negócio é reimplementada nesta camada.
 import logging
 import os
 import shutil
-import tempfile
 import threading
 from typing import List
 
@@ -25,7 +24,7 @@ from leitor_matriculas.validacao.confirmacao import confirmar_revisao_manual
 # `leitor_matriculas.ui` -- ver o motivo completo no docstring do módulo.
 from leitor_matriculas.validacao import explicacao_revisao
 
-from .. import estado
+from .. import armazenamento, config, estado
 from ..esquemas import (
     ConfirmacaoRequest, ConfirmacaoResponse, ExplicacaoResposta, LoteCriado, StatusLote,
 )
@@ -75,21 +74,32 @@ async def criar_lote(files: List[UploadFile] = File(...)):
             ),
         )
 
-    pasta_temp = tempfile.mkdtemp(prefix="lote_web_")
+    # Fase 26a: os arquivos deixaram de ir para `tempfile.mkdtemp()` e
+    # passam a viver numa pasta DURÁVEL por lote. Antes, o processamento
+    # cabia inteiro na vida do processo; com o OCR rodando noutra máquina,
+    # o arquivo precisa sobreviver a um reinício do backend -- é dele que
+    # o Worker vai baixar a folha. A contrapartida é que o sistema
+    # operacional deixa de recolher esses arquivos, então a limpeza passou
+    # a ser explícita (`armazenamento.aplicar_retencao`, na inicialização).
+    lote_id = estado.reservar_lote_id()
+    pasta_lote = armazenamento.pasta_lote(lote_id)
+    pasta_entrada = armazenamento.criar_lote(lote_id)
     caminhos = []
     try:
-        for arquivo in files:
-            nome_seguro = os.path.basename(arquivo.filename or "arquivo")
-            destino = os.path.join(pasta_temp, nome_seguro)
+        for indice, arquivo in enumerate(files):
+            # `os.path.basename` sozinho não bastava: não trata "..", nem
+            # separador da outra plataforma, nem nome reservado do Windows.
+            nome = armazenamento.nome_seguro(arquivo.filename, indice)
+            destino = os.path.join(pasta_entrada, nome)
             conteudo = await arquivo.read()
             with open(destino, "wb") as saida:
                 saida.write(conteudo)
             caminhos.append(destino)
     except Exception as exc:
-        shutil.rmtree(pasta_temp, ignore_errors=True)
+        shutil.rmtree(pasta_lote, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Falha ao salvar os arquivos enviados: {exc}") from exc
 
-    lote = estado.criar_lote(tipo=tipo, caminhos=caminhos, pasta_temp=pasta_temp)
+    lote = estado.criar_lote(tipo=tipo, caminhos=caminhos, pasta_temp=pasta_lote, lote_id=lote_id)
     return LoteCriado(lote_id=lote.id, tipo=lote.tipo, total_arquivos=len(caminhos))
 
 
@@ -108,7 +118,23 @@ def disparar_processamento(lote_id: str):
                 detail=f"Lote '{lote_id}' já está '{lote.status}' -- não pode ser disparado de novo",
             )
         lote.status = estado.STATUS_PROCESSANDO
-    threading.Thread(target=estado.processar_lote, args=(lote_id,), daemon=True).start()
+
+    # Fase 26a: duas metades, duas threads. A MOTORA (`processar_lote`)
+    # percorre as páginas em ordem e classifica -- é o lado VPS, e existe
+    # sempre. Quem PRODUZ o OCR depende do modo (ver `web/backend/config.py`):
+    # no modo local é uma thread deste processo; no modo servidor, ninguém
+    # aqui -- o lote fica aguardando um Worker, e é por isso que um upload
+    # sem Worker disponível nunca vira erro, só espera.
+    threading.Thread(target=estado.processar_lote, args=(lote_id,), daemon=True,
+                     name=f"motora-{lote_id[:8]}").start()
+    if config.roda_ocr_neste_processo():
+        # Import tardio: `produtor_ocr` puxa OpenCV e o motor de OCR, e a
+        # instalação da API (modo servidor) não tem nem quer esses pacotes.
+        from ..produtor_ocr import iniciar_em_thread
+
+        iniciar_em_thread(lote_id)
+    else:
+        estado.enfileirar(lote)
     return StatusLote(**lote.status_publico())
 
 
@@ -235,6 +261,12 @@ def confirmar_registro(lote_id: str, indice: int, corpo: ConfirmacaoRequest):
         data_manager=estado.obter_data_manager(),
         contexto_lote=contexto_lote,
     )
+    # Fase 26a: `confirmar_revisao_manual` muta o dict do registro NO LUGAR
+    # -- sem regravar aqui, uma correção manual seria a única coisa do lote
+    # a NÃO sobreviver a um reinício do backend, enquanto o resultado do
+    # OCR (bem mais caro) sobreviveria. O trabalho da pessoa não pode valer
+    # menos que o da máquina.
+    estado.persistir(lote, com_registros=True)
     return ConfirmacaoResponse(
         registro=resultado.registro,
         status_anterior=resultado.status_anterior,

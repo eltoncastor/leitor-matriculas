@@ -1,57 +1,96 @@
 """
 web/backend/estado.py
 
-Fase 24a (Web MVP). Estado do backend, desenhado em torno de `lote_id` --
-NUNCA um "lote atual" global solto no processo (o jeito como o Tkinter
-funciona, com uma única `App()` viva por vez). É o que permite, numa
-extensão futura, isolar lotes por usuário sem reescrever nenhum endpoint:
-hoje `_lotes` é só um dicionário process-wide porque só uma pessoa usa por
-vez (fora de escopo desta fase autenticar/isolar) -- mas cada chamada já
-passa e resolve por `lote_id`, nunca por "o lote".
+Estado do backend, desenhado em torno de `lote_id` -- NUNCA um "lote atual"
+global solto no processo (o jeito como o Tkinter funciona, com uma única
+`App()` viva por vez). É o que permite, numa extensão futura, isolar lotes
+por usuário sem reescrever nenhum endpoint.
 
-Engine de OCR e `DataManager` são COMPARTILHADOS por todo o processo (não
-por lote) de propósito -- é o mesmo padrão do Tkinter, onde
-`self._ocr_engine`/`self._data_manager` vivem pela sessão inteira da
-`App()` e não são recriados a cada lote processado nela, só na abertura do
-programa. Recarregar o modelo do PaddleOCR ou reler as 3 planilhas de
-referência a cada lote seria caro e não corresponderia ao comportamento
-real que este backend está reaproveitando.
+FASE 26a -- ESTE MÓDULO É O LADO "VPS" DA DIVISÃO
+-------------------------------------------------
+Até a Fase 25 este arquivo fazia as duas metades do trabalho: rodava o OCR
+E classificava o resultado. A Fase 26 separa as duas, porque só a primeira
+é cara:
 
-`ContextoLote`, ao contrário, é por LOTE -- nunca pode atravessar dois
-lotes diferentes (ver `parsing/contexto_lote.py` e o invariante documentado
-em CLAUDE.md), então cada `LoteState` tem o seu próprio.
+    ── Worker (PC Windows, `web/backend/produtor_ocr.py` hoje; um processo
+       remoto a partir da Sub-fase 26c) ────────────────────────────────
+    1. renderizar/ler a imagem da folha           cv2 / PyMuPDF
+    2. pipeline.processar_uma_pagina(...)          PaddleOCR (~40 s/folha)
+    3. comprimir a foto da página                  cv2
+    ── VPS (este módulo) ─────────────────────────────────────────────────
+    4. contexto_lote.registrar_data(...)           barato
+    5. pipeline.montar_registro_exportacao(...)    barato, precisa de dados/*.xlsx
+    6. verificar_contagem_posicoes(...)            barato
 
-O pipeline em si (OCR -> parser -> classificação) é `leitor_matriculas.
-pipeline` -- a MESMA função que `ui/app.py` chama agora (Fase 24a). Este
-módulo só orquestra ONDE guardar o resultado e COMO um cliente HTTP
-acompanha o progresso -- o equivalente, aqui, à fila+thread do Tkinter.
+O que atravessa a fronteira é `List[Registro]` -- dataclass de folhas
+JSON-safe (ver `registro_parser.Registro.como_dicionario`). As REGRAS DE
+NEGÓCIO e as planilhas de referência nunca saem da VPS: o Worker lê a
+folha, ele não decide nada sobre ela.
+
+POR QUE O LAÇO DE PÁGINAS NÃO FOI REESCRITO
+-------------------------------------------
+`processar_lote` continua sendo uma thread que percorre as páginas EM
+ORDEM, uma de cada vez -- só que agora, em vez de chamar o OCR, ela espera
+o resultado da página N chegar (`_aguardar_resultado_pagina`). Isso não é
+detalhe de implementação, é o que preserva três invariantes que uma fila
+sem ordem quebraria em silêncio:
+
+  * a ordem FÍSICA das folhas na planilha (requisito da Fase 2);
+  * o `ContextoLote`, que é DEPENDENTE DE PREFIXO -- `ano_do_lote()`
+    decide contra o que foi registrado ATÉ ALI (`MINIMO_DATAS_CONFIAVEIS`,
+    `FATOR_PREDOMINANCIA`). Trocar a ordem de chegada faz o ano ser eleito
+    numa página diferente e muda a classificação de linhas reais;
+  * os índices posicionais de `registros`, que `POST /registros/{indice}/
+    confirmar` e `explicacao_revisao.sinais_de_contexto` usam -- este
+    último inclusive OLHA OS VIZINHOS.
+
+Quem chega fora de ordem simplesmente fica no buffer até a sua vez.
 """
 import dataclasses
 import logging
 import os
-import sys
 import threading
 import time
 import uuid
-from typing import Dict, List, Optional
-
-import cv2
-import numpy as np
+from typing import Dict, List, Optional, Set
 
 from leitor_matriculas import pipeline
 from leitor_matriculas.dados.data_manager import DataManager
 from leitor_matriculas.ocr import pdf_reader
-from leitor_matriculas.ocr.engine import get_ocr_engine
 from leitor_matriculas.parsing.contexto_lote import ContextoLote
-from leitor_matriculas.parsing.registro_parser import verificar_contagem_posicoes
+from leitor_matriculas.parsing.registro_parser import Registro, verificar_contagem_posicoes
 
+from . import armazenamento
+
+# Vocabulário PÚBLICO de status -- o que o frontend conhece. Preservado
+# exatamente como estava antes da Fase 26 (`PaginaLote.jsx` trata
+# "concluido"/"erro" como terminais e qualquer outra coisa como "ainda
+# rodando"), com uma única adição: `cancelado`, que só é alcançável por
+# cancelamento explícito e nunca aparece no fluxo normal.
 STATUS_PENDENTE = "pendente"
 STATUS_PROCESSANDO = "processando"
 STATUS_CONCLUIDO = "concluido"
 STATUS_ERRO = "erro"
+STATUS_CANCELADO = "cancelado"
+
+STATUS_TERMINAIS = {STATUS_CONCLUIDO, STATUS_ERRO, STATUS_CANCELADO}
+
+# Ciclo de vida INTERNO do Job perante os Workers. Deliberadamente separado
+# do `status` público: são perguntas diferentes ("o que o usuário vê" vs.
+# "quem está com este trabalho"), e misturá-las obrigaria o frontend a
+# aprender estados que não mudam nada para ele.
+FASE_LOCAL = "local"                        # produzido no próprio processo (modo desktop/dev)
+FASE_AGUARDANDO_WORKER = "aguardando_worker"
+FASE_ATRIBUIDO = "atribuido"
+FASE_PROCESSANDO = "processando"
 
 TIPO_PDF = "pdf"
 TIPO_IMAGENS = "imagens"
+
+# Fase 26a: quanto a thread-motora espera acordar para reavaliar se o lote
+# foi cancelado / o lease expirou. Não é um timeout de página -- uma página
+# pode legitimamente levar minutos.
+_INTERVALO_REAVALIACAO_S = 1.0
 
 
 @dataclasses.dataclass
@@ -59,7 +98,7 @@ class LoteState:
     id: str
     tipo: str  # TIPO_PDF | TIPO_IMAGENS
     caminhos: List[str]
-    pasta_temp: str
+    pasta_temp: str  # a pasta durável do lote (ver web/backend/armazenamento.py)
     status: str = STATUS_PENDENTE
     etapa_atual: str = ""
     pagina_atual: int = 0
@@ -70,25 +109,43 @@ class LoteState:
     erros_paginas: List[dict] = dataclasses.field(default_factory=list)
     avisos_contagem: List[dict] = dataclasses.field(default_factory=list)
     avisos_descarte: List[dict] = dataclasses.field(default_factory=list)
-    # Fase 24c: a foto de cada página, comprimida (JPEG), para a tela de
-    # Revisão poder mostrá-la ao lado do formulário -- mesma ideia de
-    # `App._miniaturas_por_pagina` no Tkinter (Fase 10), inclusive o
-    # motivo de ser comprimida e não a matriz numpy crua: um lote de ~50
-    # folhas em memória bruta passaria de 1 GB. Chave é o número da
-    # página (`numero`, a posição física no lote -- mesma coluna "Página"
-    # que os registros já usam), nunca a página DENTRO de um PDF
-    # multi-arquivo (mesma distinção da Fase 14).
-    miniaturas_por_pagina: Dict[int, bytes] = dataclasses.field(default_factory=dict)
     # Contexto do lote (Fase 9): nunca compartilhado entre lotes -- cada
     # LoteState tem o seu, criado junto com o lote e nunca reaproveitado.
     contexto_lote: ContextoLote = dataclasses.field(default_factory=ContextoLote)
     criado_em: float = dataclasses.field(default_factory=time.time)
-    # Protege as listas/contadores acima contra a corrida entre a thread de
-    # processamento (que escreve) e as requisições GET de status/registros
-    # (que leem) -- mesmo motivo pelo qual o Tkinter nunca deixa a worker
-    # thread tocar widgets diretamente, só que aqui os dois lados só
-    # tocam dados Python puros.
+
+    # -- Fase 26a: Job perante os Workers --------------------------------
+    fase_worker: str = FASE_LOCAL
+    worker_id: Optional[str] = None
+    # Ficha de cerca (fencing token). Cada reivindicação incrementa este
+    # número. Um Worker cujo lease expirou continua VIVO e vai continuar
+    # postando páginas de um Job que já pertence a outra tentativa -- sem
+    # este contador, essas páginas seriam aceitas e corromperiam o
+    # `ContextoLote` (não só desperdiçariam trabalho).
+    tentativa: int = 0
+    lease_ate: Optional[float] = None
+    ultimo_heartbeat: Optional[float] = None
+
+    # Buffer de resultados de página que já chegaram mas cuja vez ainda não
+    # chegou (ver o cabeçalho do módulo).
+    resultados_pagina: Dict[int, dict] = dataclasses.field(default_factory=dict)
+    # Páginas já ACEITAS (deduplicação). Consultado sob o mesmo lock que
+    # guarda `contexto_lote.registrar_data` -- se a checagem ficasse fora,
+    # um reenvio contaria o ano duas vezes e deslocaria `ano_do_lote()`.
+    paginas_recebidas: Set[int] = dataclasses.field(default_factory=set)
+    parar: bool = False
+
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    condicao: threading.Condition = dataclasses.field(default=None)
+
+    def __post_init__(self):
+        # A Condition compartilha o MESMO lock que já protegia os
+        # contadores: assim `with estado.lock` continua valendo em todo
+        # lugar e a espera da thread-motora solta o lock enquanto dorme.
+        if self.condicao is None:
+            self.condicao = threading.Condition(self.lock)
+
+    # -- Leitura pública -------------------------------------------------
 
     def status_publico(self) -> dict:
         with self.lock:
@@ -115,15 +172,106 @@ class LoteState:
             return list(self.registros)
 
     def obter_miniatura(self, numero_pagina: int) -> Optional[bytes]:
-        with self.lock:
-            return self.miniaturas_por_pagina.get(numero_pagina)
+        """
+        Fase 26a: a foto passou a ser lida do DISCO em vez de um dicionário
+        em memória. Duas razões, as duas medidas antes: quem produz a foto
+        agora é outro processo (não teria como escrever num dict deste), e
+        o dicionário crescia sem limite pela vida do processo -- um lote de
+        ~50 folhas segurava dezenas de MB que ninguém mais lia depois da
+        revisão. Custa alguns milissegundos por requisição contra ~40 s de
+        OCR por página.
+        """
+        return armazenamento.ler_miniatura(self.id, numero_pagina)
 
+    # -- Persistência ----------------------------------------------------
+
+    def como_dicionario(self) -> dict:
+        """Fotografia serializável do Job. Chamado sempre COM o lock tomado."""
+        return {
+            "id": self.id,
+            "tipo": self.tipo,
+            "caminhos": self.caminhos,
+            "status": self.status,
+            "etapa_atual": self.etapa_atual,
+            "pagina_atual": self.pagina_atual,
+            "paginas_processadas": self.paginas_processadas,
+            "total_paginas": self.total_paginas,
+            "erro_fatal": self.erro_fatal,
+            "erros_paginas": self.erros_paginas,
+            "avisos_contagem": self.avisos_contagem,
+            "avisos_descarte": self.avisos_descarte,
+            "contexto_lote": self.contexto_lote.como_dicionario(),
+            "criado_em": self.criado_em,
+            "fase_worker": self.fase_worker,
+            "worker_id": self.worker_id,
+            "tentativa": self.tentativa,
+            "lease_ate": self.lease_ate,
+            "ultimo_heartbeat": self.ultimo_heartbeat,
+            "paginas_recebidas": sorted(self.paginas_recebidas),
+        }
+
+    @classmethod
+    def de_dicionario(cls, dados: dict, pasta: str) -> "LoteState":
+        estado = cls(
+            id=dados["id"],
+            tipo=dados.get("tipo", TIPO_IMAGENS),
+            caminhos=list(dados.get("caminhos") or []),
+            pasta_temp=pasta,
+            status=dados.get("status", STATUS_PENDENTE),
+            etapa_atual=dados.get("etapa_atual", ""),
+            pagina_atual=dados.get("pagina_atual", 0),
+            paginas_processadas=dados.get("paginas_processadas", 0),
+            total_paginas=dados.get("total_paginas"),
+            erro_fatal=dados.get("erro_fatal"),
+            erros_paginas=list(dados.get("erros_paginas") or []),
+            avisos_contagem=list(dados.get("avisos_contagem") or []),
+            avisos_descarte=list(dados.get("avisos_descarte") or []),
+            contexto_lote=ContextoLote.de_dicionario(dados.get("contexto_lote")),
+            criado_em=dados.get("criado_em", time.time()),
+            fase_worker=dados.get("fase_worker", FASE_LOCAL),
+            worker_id=dados.get("worker_id"),
+            tentativa=dados.get("tentativa", 0),
+            lease_ate=dados.get("lease_ate"),
+            ultimo_heartbeat=dados.get("ultimo_heartbeat"),
+            paginas_recebidas=set(dados.get("paginas_recebidas") or []),
+        )
+        estado.registros = armazenamento.ler_registros(estado.id) or []
+        return estado
+
+
+def persistir(estado: LoteState, com_registros: bool = False) -> None:
+    """
+    Grava o estado do Job. `com_registros=True` também reescreve
+    `registros.json` -- feito ao concluir e a cada confirmação manual, NÃO
+    a cada página: durante o processamento quem garante a durabilidade é
+    `paginas/NNN.json` (o resultado caro do OCR), e reescrever a lista
+    inteira a cada página seria trabalho de disco quadrático num lote de
+    200 folhas sem proteger nada que já não esteja protegido.
+    """
+    try:
+        with estado.lock:
+            dados = estado.como_dicionario()
+            registros = list(estado.registros) if com_registros else None
+        armazenamento.gravar_estado(estado.id, dados)
+        if registros is not None:
+            armazenamento.gravar_registros(estado.id, registros)
+    except Exception:
+        # Nunca derruba o processamento: perder a durabilidade é ruim, mas
+        # perder o lote que está rodando é pior (mesmo critério da
+        # miniatura na Fase 10 e do histórico de correções na Fase 20).
+        logging.exception("Falha ao persistir o estado do lote %s", estado.id)
+
+
+# ---------------------------------------------------------------------------
+# Registro de lotes e singletons de processo
+# ---------------------------------------------------------------------------
 
 _lotes: Dict[str, LoteState] = {}
 _lotes_trava = threading.Lock()
 
 _engine_trava = threading.Lock()
 _ocr_engine = None
+_data_manager_trava = threading.Lock()
 _data_manager: Optional[DataManager] = None
 
 
@@ -131,29 +279,14 @@ def _pasta_dados_ao_lado_do_executavel() -> Optional[str]:
     """
     Sub-fase 25b (empacotamento com PyInstaller): `DataManager()` sem
     argumento resolve `dados/` a partir do PRÓPRIO `__file__` de
-    `data_manager.py`, três níveis acima (ver o docstring dele) -- isso
-    continua correto rodando `python web/backend/main.py` direto do
-    repositório, mas quebra (ou, pior, resolve para um lugar ERRADO sem
-    avisar) dentro de um `.exe` empacotado:
-
-      - em `--onedir`, o `__file__` sintético que o PyInstaller atribui ao
-        módulo congelado ainda aponta para dentro da PASTA do próprio
-        pacote (`sys._MEIPASS`, que em onedir É a pasta onde o `.exe`
-        está) -- então o cálculo "três níveis acima" até funcionaria por
-        acidente, mas depende de detalhe de implementação do PyInstaller,
-        não de nada garantido;
-      - em `--onefile`, `sys._MEIPASS` é uma pasta TEMPORÁRIA nova a cada
-        execução (`%TEMP%\\_MEIxxxxxx`) -- gravar/ler `dados/` ali seria
-        efetivamente `dados/` sumir a cada reinício, o oposto do pedido
-        desta sub-fase ("editável pelo usuário sem reempacotar").
-
-    A forma robusta e igual nos dois modos é `os.path.dirname(sys.
-    executable)` -- SEMPRE a pasta onde o `.exe` real está, nos dois casos
-    (nunca a pasta temporária de extração). Fora de um build congelado
-    (`sys.frozen` ausente -- o caso de sempre, rodando via `python`),
-    devolve `None` e `DataManager()` resolve exatamente como sempre
-    resolveu -- este ajuste é invisível fora do `.exe`.
+    `data_manager.py`, três níveis acima -- correto rodando do
+    repositório, errado (ou pior, silenciosamente errado) dentro de um
+    `.exe`. `os.path.dirname(sys.executable)` é a forma robusta e igual
+    nos dois modos (`--onedir` e `--onefile`). Fora de um build congelado
+    devolve `None` e nada muda.
     """
+    import sys
+
     if getattr(sys, "frozen", False):
         return os.path.join(os.path.dirname(sys.executable), "dados")
     return None
@@ -162,119 +295,318 @@ def _pasta_dados_ao_lado_do_executavel() -> Optional[str]:
 def obter_data_manager() -> DataManager:
     """Instância única por processo -- ver docstring do módulo."""
     global _data_manager
-    if _data_manager is None:
-        _data_manager = DataManager(pasta_dados=_pasta_dados_ao_lado_do_executavel())
-    return _data_manager
+    # Fase 26a: o lock estava faltando aqui (só `obter_ocr_engine` tinha).
+    # As rotas síncronas do FastAPI rodam no threadpool, então duas
+    # requisições simultâneas num processo frio construíam DOIS
+    # DataManager, relendo as três planilhas em paralelo.
+    with _data_manager_trava:
+        if _data_manager is None:
+            _data_manager = DataManager(pasta_dados=_pasta_dados_ao_lado_do_executavel())
+        return _data_manager
 
 
 def obter_ocr_engine():
     """Instância única por processo, carregada sob demanda na primeira
-    página que qualquer lote processar (mesmo comportamento de
-    `App._processar_uma_pagina`: o modelo só é carregado quando a
-    primeira folha de verdade chega)."""
+    página que qualquer lote processar."""
     global _ocr_engine
     with _engine_trava:
         if _ocr_engine is None:
+            from leitor_matriculas.ocr.engine import get_ocr_engine
+
             _ocr_engine = get_ocr_engine("paddleocr")
         return _ocr_engine
 
 
-def criar_lote(tipo: str, caminhos: List[str], pasta_temp: str) -> LoteState:
-    lote_id = uuid.uuid4().hex
-    estado = LoteState(id=lote_id, tipo=tipo, caminhos=caminhos, pasta_temp=pasta_temp)
+def reservar_lote_id() -> str:
+    return uuid.uuid4().hex
+
+
+def criar_lote(tipo: str, caminhos: List[str], pasta_temp: str, lote_id: Optional[str] = None) -> LoteState:
+    estado = LoteState(
+        id=lote_id or reservar_lote_id(), tipo=tipo, caminhos=caminhos, pasta_temp=pasta_temp
+    )
     with _lotes_trava:
-        _lotes[lote_id] = estado
+        _lotes[estado.id] = estado
+    persistir(estado)
     return estado
 
 
 def obter_lote(lote_id: str) -> Optional[LoteState]:
     with _lotes_trava:
-        return _lotes.get(lote_id)
+        estado = _lotes.get(lote_id)
+    if estado is not None:
+        return estado
+    return _recuperar_do_disco(lote_id)
 
 
-def _ler_imagem(caminho: str) -> np.ndarray:
-    """Mesma leitura que `ui/app.py::_ler_imagem` (via `np.fromfile` +
-    `cv2.imdecode`, que lida com acentos no caminho no Windows -- `cv2.
-    imread` não). Não importado de lá de propósito: nada no backend web
-    depende de `leitor_matriculas.ui` (via de mão única do projeto -- ver
-    CLAUDE.md, "ui/app.py é o único módulo autorizado a coordenar os
-    outros"). É I/O trivial, não lógica de negócio; duplicar 4 linhas é
-    mais barato que criar uma dependência na direção errada."""
-    dados = np.fromfile(caminho, dtype=np.uint8)
-    imagem = cv2.imdecode(dados, cv2.IMREAD_COLOR)
-    if imagem is None:
-        raise ValueError(f"Não foi possível abrir a imagem: {caminho}")
-    return imagem
-
-
-# Mesmos valores de `ui/app.py` (Fase 10) -- a foto é comodidade da
-# revisão, não dado; comprimir demais perderia legibilidade do
-# manuscrito, comprimir de menos custaria a mesma explosão de RAM que a
-# Fase 10 já mediu e evitou no Tkinter.
-LARGURA_MAXIMA_MINIATURA = 1500
-QUALIDADE_MINIATURA = 85
-
-
-def _comprimir_para_miniatura(imagem_bgr) -> Optional[bytes]:
-    """Mesma lógica de `ui/app.py::_comprimir_para_miniatura` (Fase 10),
-    duplicada aqui pelo mesmo motivo que `_ler_imagem` acima -- é I/O/
-    processamento de imagem trivial, não lógica de negócio, e nada no
-    backend web pode importar de dentro de `ui/`. Nunca lança: a foto é
-    comodidade da revisão, uma falha aqui não pode derrubar o
-    processamento da página."""
+def _recuperar_do_disco(lote_id: str) -> Optional[LoteState]:
+    """
+    Um lote que não está em memória pode existir em disco -- é o caso
+    depois de um reinício do backend. Reidrata sob demanda em vez de
+    carregar tudo no boot: um lote antigo que ninguém vai abrir não
+    precisa ocupar memória.
+    """
     try:
-        altura, largura = imagem_bgr.shape[:2]
-        maior = max(altura, largura)
-        if maior > LARGURA_MAXIMA_MINIATURA:
-            fator = LARGURA_MAXIMA_MINIATURA / maior
-            imagem_bgr = cv2.resize(
-                imagem_bgr, (int(largura * fator), int(altura * fator)),
-                interpolation=cv2.INTER_AREA,
-            )
-        ok, buffer = cv2.imencode(".jpg", imagem_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), QUALIDADE_MINIATURA])
-        return buffer.tobytes() if ok else None
-    except Exception:
-        logging.exception("Falha ao preparar miniatura da página (revisão segue sem a foto)")
+        dados = armazenamento.ler_estado(lote_id)
+    except ValueError:
+        return None  # lote_id malformado (veio da URL)
+    if not dados:
         return None
+    estado = LoteState.de_dicionario(dados, armazenamento.pasta_lote(lote_id))
+    with _lotes_trava:
+        # Outra thread pode ter reidratado o mesmo lote enquanto líamos.
+        return _lotes.setdefault(lote_id, estado)
 
 
-def _informar_etapa(estado: LoteState):
-    def _callback(texto: str):
+def recuperar_lotes_do_disco() -> Dict[str, int]:
+    """
+    Varredura de inicialização. Faz duas coisas que o backend nunca fez:
+    aplica retenção (antes os uploads iam para `tempfile`, e quem limpava
+    era o sistema operacional) e devolve à fila todo Job que ficou preso em
+    `processando` -- o caso real de o processo ter morrido no meio do lote,
+    que antes deixava o `status` congelado para sempre, sem forma de
+    recuperar.
+    """
+    resumo = {"recuperados": 0, "reenfileirados": 0, "removidos": 0}
+    try:
+        resumo["removidos"] = len(armazenamento.aplicar_retencao())
+        for lote_id in armazenamento.listar_lotes():
+            dados = armazenamento.ler_estado(lote_id)
+            if not dados:
+                continue
+            resumo["recuperados"] += 1
+            if dados.get("status") == STATUS_PROCESSANDO:
+                estado = _recuperar_do_disco(lote_id)
+                if estado is None:
+                    continue
+                reenfileirar(estado, "o servidor foi reiniciado durante o processamento")
+                resumo["reenfileirados"] += 1
+    except Exception:
+        logging.exception("Falha na varredura de inicialização do armazenamento")
+    return resumo
+
+
+# ---------------------------------------------------------------------------
+# Fila / lease / fencing (o lado do Job que os Workers enxergam)
+# ---------------------------------------------------------------------------
+
+# Batidas de heartbeat perdidas antes de considerar o Worker morto. O
+# heartbeat é uma thread PRÓPRIA do Worker, independente do laço de OCR --
+# por isso o lease pode ser curto sem ser sensível à duração de uma página
+# (que legitimamente passa de 40 s, e muito mais no primeiro carregamento
+# do modelo do PaddleOCR).
+INTERVALO_HEARTBEAT_S = 30.0
+LEASE_S = 120.0
+# Detector separado, para o caso que o heartbeat NÃO pega: processo vivo,
+# batendo normalmente, com o OCR travado. Medido contra o avanço de
+# `paginas_processadas`, não contra o relógio de heartbeat.
+LIMITE_SEM_PROGRESSO_S = 600.0
+
+
+def enfileirar(estado: LoteState) -> None:
+    """Coloca o Job à disposição dos Workers."""
+    with estado.lock:
+        estado.status = STATUS_PROCESSANDO
+        estado.fase_worker = FASE_AGUARDANDO_WORKER
+        estado.etapa_atual = "Aguardando um computador de leitura ficar disponível"
+        estado.parar = False
+    persistir(estado)
+
+
+def reenfileirar(estado: LoteState, motivo: str) -> None:
+    """
+    Devolve um Job à fila. As páginas cujo OCR já está em disco NÃO são
+    perdidas -- `paginas_pendentes` só devolve o que falta. É por isso que
+    um lease expirado custa segundos e não horas.
+
+    A `tentativa` é incrementada: qualquer chamada do Worker anterior
+    passa a ser rejeitada (ver o comentário do campo).
+    """
+    with estado.lock:
+        estado.tentativa += 1
+        estado.worker_id = None
+        estado.lease_ate = None
+        estado.ultimo_heartbeat = None
+        estado.fase_worker = FASE_AGUARDANDO_WORKER
+        estado.status = STATUS_PROCESSANDO
+        estado.etapa_atual = f"Retomando o processamento ({motivo})"
+        estado.parar = True  # solta a thread-motora antiga, se houver
+        estado.condicao.notify_all()
+    persistir(estado)
+
+
+def paginas_pendentes(estado: LoteState) -> List[int]:
+    """Páginas que ainda não têm resultado de OCR gravado em disco."""
+    ja_temos = armazenamento.paginas_persistidas(estado.id)
+    with estado.lock:
+        total = estado.total_paginas or 0
+    return [n for n in range(1, total + 1) if n not in ja_temos]
+
+
+def lease_expirado(estado: LoteState, agora: Optional[float] = None) -> bool:
+    agora = agora or time.time()
+    with estado.lock:
+        if estado.fase_worker not in (FASE_ATRIBUIDO, FASE_PROCESSANDO):
+            return False
+        return estado.lease_ate is not None and estado.lease_ate < agora
+
+
+def cancelar(estado: LoteState) -> None:
+    with estado.lock:
+        if estado.status in STATUS_TERMINAIS:
+            return
+        estado.status = STATUS_CANCELADO
+        estado.etapa_atual = ""
+        estado.parar = True
+        estado.condicao.notify_all()
+    persistir(estado, com_registros=True)
+
+
+# ---------------------------------------------------------------------------
+# Entrega de resultados (chamada pelo produtor local hoje; pelo Worker a
+# partir da Sub-fase 26b)
+# ---------------------------------------------------------------------------
+
+def depositar_resultado_pagina(estado: LoteState, numero: int, resultado: dict,
+                               tentativa: Optional[int] = None) -> str:
+    """
+    Entrega o resultado do OCR de UMA página. Devolve:
+        "aceito"     -- entrou no buffer, a thread-motora vai consumir
+        "duplicado"  -- essa página já foi aceita (reenvio após queda de
+                        conexão); no-op seguro, nunca conta duas vezes
+        "obsoleto"   -- veio de uma tentativa anterior do Job (Worker
+                        zumbi); recusado
+
+    `resultado` traz `registros` (lista de `Registro.como_dicionario()`),
+    `erro` (texto cru, SEM prefixo -- ver `_mensagem_erro_pagina`) e
+    `fase_erro`.
+    """
+    with estado.lock:
+        if tentativa is not None and tentativa != estado.tentativa:
+            return "obsoleto"
+        if numero in estado.paginas_recebidas:
+            return "duplicado"
+        estado.paginas_recebidas.add(numero)
+        estado.resultados_pagina[numero] = resultado
+        estado.condicao.notify_all()
+    # Fora do lock: I/O de disco não precisa segurar quem está lendo status.
+    try:
+        armazenamento.gravar_pagina(estado.id, numero, resultado)
+    except Exception:
+        logging.exception("Falha ao persistir a página %s do lote %s", numero, estado.id)
+    return "aceito"
+
+
+def depositar_miniatura(estado: LoteState, numero: int, conteudo: bytes) -> bool:
+    """A foto da folha. Canal separado do resultado de propósito: ela é
+    comodidade da revisão, não dado -- uma falha aqui jamais pode custar o
+    OCR daquela página, que levou ~40 s."""
+    return armazenamento.gravar_miniatura(estado.id, numero, conteudo)
+
+
+def registrar_etapa(estado: LoteState, texto: str) -> None:
+    with estado.lock:
+        estado.etapa_atual = texto
+
+
+def registrar_total_paginas(estado: LoteState, total: int) -> None:
+    with estado.lock:
+        estado.total_paginas = total
+        estado.condicao.notify_all()
+    persistir(estado)
+
+
+# ---------------------------------------------------------------------------
+# Thread-motora: consome os resultados EM ORDEM e classifica
+# ---------------------------------------------------------------------------
+
+def _aguardar_resultado_pagina(estado: LoteState, numero: int) -> Optional[dict]:
+    """
+    Bloqueia até o resultado da página `numero` estar disponível -- vindo
+    do buffer (acabou de chegar) ou do disco (já tinha chegado numa
+    tentativa anterior, ou antes de um reinício do servidor).
+
+    Devolve `None` quando o lote foi cancelado ou reenfileirado, para a
+    thread-motora encerrar sem processar nada pela metade.
+    """
+    # Uma página já persistida dispensa qualquer espera -- é o caminho da
+    # retomada barata (ver `reenfileirar`).
+    persistida = armazenamento.ler_pagina(estado.id, numero)
+    if persistida is not None:
         with estado.lock:
-            estado.etapa_atual = texto
-    return _callback
+            estado.paginas_recebidas.add(numero)
+            estado.resultados_pagina.pop(numero, None)
+        return persistida
+
+    with estado.condicao:
+        while numero not in estado.resultados_pagina:
+            if estado.parar or estado.status in STATUS_TERMINAIS:
+                return None
+            estado.condicao.wait(timeout=_INTERVALO_REAVALIACAO_S)
+        return estado.resultados_pagina.pop(numero)
 
 
-def _processar_pagina_e_registrar(estado: LoteState, numero: int, imagem_bgr, origem_erro_prefix: Optional[str] = None):
-    """Equivalente a `App._processar_item` (o consumo da fila) + `App.
-    _adicionar_registros` combinados -- só que sem fila: escreve direto no
-    LoteState, sob lock. Isola a falha de UMA página (nunca aborta o
-    lote), mesmo padrão da Fase 7/14."""
-    engine = obter_ocr_engine()
-    imagem_processada, registros, erro = pipeline.processar_uma_pagina(
-        imagem_bgr, engine, informar_etapa=_informar_etapa(estado)
-    )
+def _nome_do_arquivo(estado: LoteState, numero: int) -> str:
+    if estado.tipo == TIPO_PDF:
+        return os.path.basename(estado.caminhos[0]) if estado.caminhos else ""
+    indice = numero - 1
+    if 0 <= indice < len(estado.caminhos):
+        return os.path.basename(estado.caminhos[indice])
+    return ""
+
+
+def _mensagem_erro_pagina(estado: LoteState, numero: int, erro: str, fase_erro: str) -> str:
+    """
+    As mensagens de erro continuam sendo FORMATADAS AQUI, na VPS, e não no
+    Worker. Motivo: elas citam o nome do arquivo que o USUÁRIO enviou, e o
+    Worker só tem uma cópia local com um nome que pode ter sido saneado.
+    Manter a formatação aqui preserva as frases exatamente como estavam
+    antes da Fase 26 (há teste que casa com elas).
+    """
+    nome = _nome_do_arquivo(estado, numero)
+    if fase_erro == "renderizacao":
+        return f"Falha ao renderizar a página {numero} de '{nome}': {erro}"
+    if fase_erro == "leitura":
+        return f"Falha ao abrir '{nome}': {erro}"
+    prefixo = f"página {numero} de '{nome}'" if estado.tipo == TIPO_PDF else f"'{nome}'"
+    return f"{prefixo}: {erro}"
+
+
+def _aplicar_erro_de_pagina(estado: LoteState, numero: int, mensagem: str) -> None:
+    """Mesma sequência de antes da Fase 26: a página vira UMA linha ERRO,
+    entra na lista de erros e avança os contadores -- sem contexto do lote,
+    sem classificação e sem aviso de contagem (uma página que falhou não
+    tem contagem de posições a conferir)."""
+    with estado.lock:
+        estado.registros.append(pipeline.registro_erro_pagina(numero, mensagem))
+        estado.erros_paginas.append({"pagina": numero, "mensagem": mensagem})
+        estado.pagina_atual = numero
+        estado.paginas_processadas += 1
+
+
+def _aplicar_resultado_pagina(estado: LoteState, numero: int, resultado: dict) -> None:
+    """A metade LEVE do pipeline -- exatamente a mesma sequência (e a mesma
+    ordem) que `_processar_pagina_e_registrar` executava antes da Fase 26,
+    só que a partir de `Registro`s que vieram serializados."""
+    erro = resultado.get("erro")
     if erro:
-        mensagem = f"{origem_erro_prefix}: {erro}" if origem_erro_prefix else erro
-        with estado.lock:
-            estado.registros.append(pipeline.registro_erro_pagina(numero, mensagem))
-            estado.erros_paginas.append({"pagina": numero, "mensagem": mensagem})
-            estado.pagina_atual = numero
-            estado.paginas_processadas += 1
+        _aplicar_erro_de_pagina(
+            estado, numero,
+            _mensagem_erro_pagina(estado, numero, erro, resultado.get("fase_erro") or "pipeline"),
+        )
         return
 
-    # Foto da página para a tela de Revisão -- só no caminho de sucesso,
-    # mesma condição de `App._processar_item` (Fase 10): uma página que
-    # falhou pode nem ter uma imagem válida para comprimir. Fora do
-    # `with estado.lock` de propósito -- comprimir/reamostrar é CPU-bound
-    # e não precisa do lock, só a escrita no dict abaixo precisa.
-    miniatura = _comprimir_para_miniatura(imagem_bgr)
-    if miniatura is not None:
-        with estado.lock:
-            estado.miniaturas_por_pagina[numero] = miniatura
+    try:
+        registros = [Registro.de_dicionario(d) for d in (resultado.get("registros") or [])]
+    except Exception as exc:
+        _aplicar_erro_de_pagina(
+            estado, numero,
+            _mensagem_erro_pagina(estado, numero, f"resultado ilegível do leitor: {exc}", "pipeline"),
+        )
+        return
 
-    # Contexto do lote ANTES de classificar (Fase 9): mesma ordem de
-    # `App._adicionar_registros`.
+    # Contexto do lote ANTES de classificar (Fase 9) -- e sob o MESMO lock
+    # que a deduplicação usa, para um reenvio nunca contar o ano duas vezes.
     with estado.lock:
         for registro in registros:
             campo_data = registro.campos.get("data")
@@ -298,73 +630,65 @@ def _processar_pagina_e_registrar(estado: LoteState, numero: int, imagem_bgr, or
         estado.paginas_processadas += 1
 
 
-def _processar_lote_pdf(estado: LoteState):
-    caminho_pdf = estado.caminhos[0]
-    nome_pdf = os.path.basename(caminho_pdf)
-    total = pdf_reader.contar_paginas(caminho_pdf)
-    with estado.lock:
-        estado.total_paginas = total
-
-    for pagina_pdf in pdf_reader.iterar_paginas(caminho_pdf):
-        numero = pagina_pdf.numero
-        if pagina_pdf.erro:
-            mensagem = f"Falha ao renderizar a página {numero} de '{nome_pdf}': {pagina_pdf.erro}"
-            with estado.lock:
-                estado.registros.append(pipeline.registro_erro_pagina(numero, mensagem))
-                estado.erros_paginas.append({"pagina": numero, "mensagem": mensagem})
-                estado.pagina_atual = numero
-                estado.paginas_processadas += 1
-            continue
-        _processar_pagina_e_registrar(
-            estado, numero, pagina_pdf.imagem,
-            origem_erro_prefix=f"página {numero} de '{nome_pdf}'",
-        )
-
-
-def _processar_lote_imagens(estado: LoteState):
-    total = len(estado.caminhos)
-    with estado.lock:
-        estado.total_paginas = total
-
-    for indice, caminho in enumerate(estado.caminhos, start=1):
-        nome_arquivo = os.path.basename(caminho)
-        try:
-            imagem_bgr = _ler_imagem(caminho)
-        except Exception as exc:
-            mensagem = f"Falha ao abrir '{nome_arquivo}': {exc}"
-            with estado.lock:
-                estado.registros.append(pipeline.registro_erro_pagina(indice, mensagem))
-                estado.erros_paginas.append({"pagina": indice, "mensagem": mensagem})
-                estado.pagina_atual = indice
-                estado.paginas_processadas += 1
-            continue
-        _processar_pagina_e_registrar(estado, indice, imagem_bgr, origem_erro_prefix=f"'{nome_arquivo}'")
+def _descobrir_total_paginas(estado: LoteState) -> int:
+    """
+    O total é calculado na VPS, não pedido ao Worker. Para imagens é
+    `len(caminhos)`, de graça. Para PDF é `pdf_reader.contar_paginas` --
+    que só abre o documento e lê o cabeçalho (a RENDERIZAÇÃO, essa sim
+    cara, continua sendo trabalho do Worker). Mantém o PyMuPDF instalado
+    na VPS, e em troca a barra de progresso mostra "Folha X de Y" desde o
+    primeiro instante, como antes da Fase 26 -- pedir o total ao Worker
+    deixaria o denominador vazio durante todo o download do arquivo.
+    """
+    if estado.tipo == TIPO_PDF:
+        return pdf_reader.contar_paginas(estado.caminhos[0])
+    return len(estado.caminhos)
 
 
 def processar_lote(lote_id: str) -> None:
     """
-    Roda numa thread separada (chamada por `rotas/lotes.py` via
-    `threading.Thread`), mesmo motivo do worker do Tkinter: o OCR é lento
-    (~40 s/folha) e uma requisição HTTP não pode ficar bloqueada esperando
-    o lote inteiro. Uma falha inesperada aqui (fora do que `pipeline.
-    processar_uma_pagina` já isola por página) marca o lote inteiro como
-    STATUS_ERRO -- equivalente a `("erro_fatal", ...)` na fila do Tkinter.
+    Thread-motora do Job: percorre as páginas EM ORDEM, espera o resultado
+    de cada uma e classifica. Não roda OCR -- ver o cabeçalho do módulo.
+
+    Uma falha inesperada aqui (fora do que já é isolado por página) marca o
+    lote inteiro como STATUS_ERRO.
     """
     estado = obter_lote(lote_id)
     if estado is None:
         return
     with estado.lock:
         estado.status = STATUS_PROCESSANDO
+        estado.parar = False
+        tentativa_desta_execucao = estado.tentativa
+
     try:
-        if estado.tipo == TIPO_PDF:
-            _processar_lote_pdf(estado)
-        else:
-            _processar_lote_imagens(estado)
+        total = _descobrir_total_paginas(estado)
+        registrar_total_paginas(estado, total)
+
+        for numero in range(1, total + 1):
+            resultado = _aguardar_resultado_pagina(estado, numero)
+            if resultado is None:
+                # Cancelado ou reenfileirado: sair sem concluir. Quem
+                # reenfileirou já ajustou o estado.
+                return
+            with estado.lock:
+                if estado.tentativa != tentativa_desta_execucao:
+                    return  # outra tentativa assumiu este Job
+            _aplicar_resultado_pagina(estado, numero, resultado)
+            persistir(estado)
+
         with estado.lock:
+            if estado.status in STATUS_TERMINAIS:
+                return
             estado.status = STATUS_CONCLUIDO
             estado.etapa_atual = ""
+            estado.fase_worker = FASE_LOCAL
+            estado.worker_id = None
+            estado.lease_ate = None
+        persistir(estado, com_registros=True)
     except Exception as exc:
         logging.exception("Falha inesperada processando o lote %s", lote_id)
         with estado.lock:
             estado.status = STATUS_ERRO
             estado.erro_fatal = str(exc)
+        persistir(estado, com_registros=True)

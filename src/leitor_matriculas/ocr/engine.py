@@ -22,7 +22,18 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
-import cv2
+
+# Fase 26a: `cv2` NÃO é importado aqui no topo de propósito. Ele é usado em
+# um único ponto deste módulo (a conversão para 3 canais dentro de
+# `PaddleOCREngine.recognize`) -- ou seja, só no caminho que de fato roda
+# OCR, que a partir da Fase 26 mora no Worker, nunca na VPS. A VPS importa
+# este módulo assim mesmo (por `OCRResult`, que o parser espacial usa, e
+# por `normalizar_matricula`, que a classificação usa), e um import de topo
+# obrigaria a instalar o OpenCV (~90 MB) num processo que jamais abre uma
+# imagem. O import vive dentro de `recognize`; depois da primeira chamada
+# ele sai do cache de módulos do Python, então não há custo por página.
+# `numpy` continua no topo porque é usado nas ANOTAÇÕES de tipo abaixo,
+# avaliadas na definição das funções.
 
 
 @dataclass
@@ -108,6 +119,8 @@ class PaddleOCREngine(OCREngine):
         # aqui para 3 canais (sem alterar o conteúdo, só o formato) para
         # evitar esse erro.
         if image.ndim == 2:
+            import cv2  # Fase 26a: import tardio -- ver comentário no topo do módulo.
+
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
         raw_results = self._ocr.predict(image)
