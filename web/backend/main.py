@@ -99,7 +99,7 @@ from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from web.backend import config, estado  # noqa: E402
-from web.backend.rotas import lotes  # noqa: E402
+from web.backend.rotas import lotes, worker  # noqa: E402
 
 app = FastAPI(
     title="Leitor de Matrículas -- API Web (MVP)",
@@ -152,6 +152,11 @@ def _recuperar_lotes_persistidos():
         "Armazenamento: %s lote(s) recuperado(s), %s reenfileirado(s), %s removido(s) por retenção. Modo: %s",
         resumo.get("recuperados"), resumo.get("reenfileirados"), resumo.get("removidos"), config.modo(),
     )
+    # Fase 26b: a thread que devolve à fila todo Job com lease vencido ou
+    # sem progresso (D6) -- precisa estar de pé mesmo em modo `local`
+    # (onde nunca vai encontrar nada para reenfileirar, mas custa nada
+    # deixá-la rodando; simplifica não ter dois caminhos de inicialização).
+    estado.iniciar_vigilante_de_leases()
 
 
 app.include_router(lotes.router)
@@ -178,6 +183,19 @@ app.include_router(lotes.router, prefix="/api")
 # aqui -- por isso o backend responde nos dois formatos (com e sem o
 # prefixo), igual já fazia para "/api" desde a Sub-fase 25a.
 app.include_router(lotes.router, prefix="/leitor/api")
+
+# Fase 26b: as rotas de Worker (`/api/worker/*`) são montadas SÓ sob
+# "/api" -- deliberadamente NUNCA sob "/leitor/api", ao contrário de
+# `lotes.router` logo acima. O Cloudflare Tunnel da VPS só roteia
+# "/leitor/*" até este backend (ver o ajuste pós-Fase 25 no CLAUDE.md) --
+# não montar aqui é o que torna esta superfície INALCANÇÁVEL da internet
+# pública por construção, sem depender de nenhuma regra de firewall. O
+# acesso real é pela Tailscale (`http://<ip-100.x>:8000/api/worker/...`);
+# o token (`auth_worker.py`) é a segunda camada, nunca a única. Uma
+# requisição para "/leitor/api/worker/..." cai no catch-all da SPA
+# abaixo e recebe 404 JSON (o segmento "api" já é reservado ali), nunca
+# uma resposta de Worker.
+app.include_router(worker.router, prefix="/api")
 
 
 @app.get("/saude")

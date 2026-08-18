@@ -48,6 +48,9 @@ python web\backend\testes\teste_api_lote_real.py
 
 # Fase 26a -- Job, persistência e ordem de chegada das páginas (rápido, sem OCR):
 python web\backend\testes\teste_job_persistencia.py
+
+# Fase 26b -- protocolo /api/worker/* (auth, claim, lease, ficha de cerca; rápido, sem OCR):
+python web\backend\testes\teste_worker_api.py
 ```
 
 Todos redirecionam o armazenamento para uma pasta temporária: rodar a suíte nunca escreve no
@@ -63,6 +66,7 @@ Quem decide isso é uma variável de ambiente:
 |---|---|---|
 | `LEITOR_MODO` | `local` | `local`: este processo roda o OCR (modo desktop, `.exe` e desenvolvimento). `servidor`: este processo **não** roda OCR — os lotes ficam aguardando um Worker. É o modo da VPS. |
 | `LEITOR_ARMAZENAMENTO` | `<raiz>/armazenamento` | Onde ficam os lotes (arquivos enviados, resultado de OCR por página, fotos das folhas, planilha gerada). Na VPS, aponte para um caminho que sobreviva ao deploy. |
+| `LEITOR_WORKER_TOKEN` | *(nenhum)* | Fase 26b. Token que autentica as rotas `/api/worker/*`. Sem ele configurado, TODA requisição de Worker é recusada (503) -- nunca aceita por padrão. Escolha uma string com pelo menos 16 caracteres; nunca commitar. |
 
 O padrão é `local` de propósito: quem não configurar nada tem o comportamento de sempre, e um erro
 de configuração na VPS resulta em "a máquina errada trabalhou", nunca em "o lote sumiu".
@@ -73,6 +77,27 @@ inteiros em silêncio, com o `status` congelado em "processando". Agora um lote 
 reinício, e um lote que estava sendo processado volta para a fila **sem refazer o OCR das páginas
 já lidas**. Em troca, a limpeza virou explícita: lotes com mais de 30 dias são removidos na
 inicialização. A pasta é gitignored (contém matrículas e nomes reais) e recriada sozinha.
+
+## Protocolo de Worker (Fase 26b)
+
+`/api/worker/*` (`web/backend/rotas/worker.py`) é o que um Worker remoto fala com a VPS -- a
+direção é sempre `Worker → VPS` (o Worker está atrás de NAT, faz polling e entrega resultado por
+POST, nunca recebe conexão). Montado **só** sob `/api/worker`, nunca sob `/leitor/api/worker` --
+como o Cloudflare Tunnel só roteia `/leitor/*` até este backend, essa decisão já torna a superfície
+de Worker inalcançável da internet pública, por construção; o acesso real é pela Tailscale, e o
+token (`LEITOR_WORKER_TOKEN`, acima) é a segunda camada, nunca a única.
+
+Toda chamada exige `Authorization: Bearer <LEITOR_WORKER_TOKEN>` e `X-Worker-Id: <identificador>`
+(o `worker_id` é só um rótulo de log -- quem decide autorização é sempre o token). Fluxo: `POST
+/register` (opcional, valida a configuração) → `GET /jobs/next` (fila) → `POST /jobs/{id}/claim`
+(reivindicação atômica -- devolve uma `tentativa`, a ficha de cerca que toda chamada seguinte
+precisa repetir) → `GET /jobs/{id}/arquivos/{indice}` (baixar a folha) → por página: `PUT
+/jobs/{id}/paginas/{n}/miniatura` **antes de** `POST /jobs/{id}/paginas/{n}` (ordem importa -- ver
+`saida/auditoria_fase26_ocr_worker.md`, Sub-fase 26b) → `POST /jobs/{id}/progresso` (opcional) →
+`POST /jobs/{id}/concluir`. Falha do documento inteiro (arquivo que não abre): `POST /jobs/{id}/erro`.
+
+Ainda não existe um processo Worker Windows real que fale este protocolo -- é a Sub-fase 26c. Quem
+o exercita hoje é `web/backend/testes/teste_worker_api.py`.
 
 ## Frontend (Fase 24b)
 

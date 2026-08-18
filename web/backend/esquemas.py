@@ -74,3 +74,89 @@ class ExplicacaoResposta(BaseModel):
 
 class ErroResposta(BaseModel):
     detalhe: str
+
+
+# ---------------------------------------------------------------------------
+# Fase 26b -- protocolo Worker <-> VPS. `worker_id` viaja no cabeçalho
+# `X-Worker-Id` (ver `auth_worker.py`), nunca no corpo -- não há por que
+# repeti-lo em cada modelo.
+# ---------------------------------------------------------------------------
+
+class ProximoJobResposta(BaseModel):
+    """`GET /api/worker/jobs/next`. `lote_id=None` quando não há Job
+    disponível -- resposta normal (200), não erro; o Worker deve fazer
+    polling de novo depois de um intervalo, nunca tratar isso como falha."""
+    lote_id: Optional[str] = None
+
+
+class JobReivindicado(BaseModel):
+    """`POST /api/worker/jobs/{id}/claim`. `tentativa` é a ficha de cerca
+    desta reivindicação -- o Worker precisa devolvê-la em toda chamada
+    seguinte sobre este Job (heartbeat, páginas, progresso, conclusão,
+    erro); um valor errado é sempre recusado com 409."""
+    lote_id: str
+    tentativa: int
+    tipo: str
+    total_paginas: Optional[int]
+    # Nomes dos arquivos de entrada, na ordem em que `GET .../arquivos/
+    # {indice}` os serve (índice 0-based) -- o Worker nunca lê o caminho
+    # local do disco da VPS, só o nome, por transparência de log.
+    nomes_arquivos: List[str]
+    # Só as páginas cujo OCR AINDA NÃO está gravado (retomada barata --
+    # ver `web/backend/armazenamento.py`). Vazio quando `total_paginas`
+    # ainda não é conhecido (o Worker calcula lendo o PDF que baixou).
+    paginas_pendentes: List[int]
+
+
+class HeartbeatRequest(BaseModel):
+    tentativa: int
+    lote_id: Optional[str] = None
+
+
+class HeartbeatResposta(BaseModel):
+    """`ainda_dono=False` quando o lease já expirou e o Job foi
+    reenfileirado -- o Worker deve parar de trabalhar nele imediatamente,
+    mesmo que ainda tenha páginas para entregar."""
+    ainda_dono: bool
+
+
+class ResultadoPaginaRequest(BaseModel):
+    tentativa: int
+    erro: Optional[str] = None
+    # "renderizacao" | "leitura" | "pipeline" | None -- ver `estado.
+    # _mensagem_erro_pagina`, que usa isto para escolher a frase.
+    fase_erro: Optional[str] = None
+    # `Registro.como_dicionario()` por registro da página -- vazio quando
+    # `erro` está preenchido.
+    registros: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ResultadoPaginaResposta(BaseModel):
+    resultado: str  # "aceito" | "duplicado" | "obsoleto"
+
+
+class ProgressoRequest(BaseModel):
+    tentativa: int
+    etapa_atual: Optional[str] = None
+    # Só o PDF manda isto, e só na primeira página (o Worker é quem
+    # renderiza e sabe o total; ver a troca de responsabilidade descrita
+    # em `estado._descobrir_total_paginas`/CLAUDE.md).
+    total_paginas: Optional[int] = None
+
+
+class ConcluirRequest(BaseModel):
+    tentativa: int
+
+
+class ErroDeDocumentoRequest(BaseModel):
+    tentativa: int
+    mensagem: str
+
+
+class StatusWorkerResposta(BaseModel):
+    """`GET /api/worker/status` -- nunca inclui o token nem qualquer
+    segredo, só contagens agregadas."""
+    modo: str
+    jobs_aguardando_worker: int
+    jobs_em_processamento: int
+    jobs_concluidos_recentes: int

@@ -144,6 +144,22 @@ def consultar_status(lote_id: str):
     return StatusLote(**lote.status_publico())
 
 
+@router.post("/{lote_id}/cancelar", response_model=StatusLote)
+def cancelar_lote(lote_id: str):
+    """
+    Fase 26b. Único jeito de sair de `pendente`/`processando` sem
+    concluir de verdade -- útil sobretudo no modo servidor, quando um
+    lote fica `aguardando_worker` por engano (arquivo errado, lote
+    duplicado) e não há razão para esperar um Worker processá-lo. Um
+    lote já terminado (`concluido`/`erro`/`cancelado`) simplesmente
+    devolve o status atual -- cancelar não é destrutivo, então repetir a
+    chamada é seguro.
+    """
+    lote = _lote_ou_404(lote_id)
+    estado.cancelar(lote)
+    return StatusLote(**lote.status_publico())
+
+
 def _campos_bloqueantes(registro: dict) -> List[str]:
     """
     Fase 24c: só o(s) NOME(s) do(s) campo(s) que bloqueiam a linha --

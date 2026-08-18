@@ -125,6 +125,13 @@ class LoteState:
     tentativa: int = 0
     lease_ate: Optional[float] = None
     ultimo_heartbeat: Optional[float] = None
+    # Fase 26b: relógio SEPARADO do heartbeat -- o heartbeat prova que o
+    # PROCESSO do Worker está vivo; este prova que ele está PRODUZINDO. Um
+    # processo pode heartbeat normalmente com o OCR travado (D6 do plano
+    # desta fase); é para pegar esse caso que este campo existe. Atualizado
+    # a cada página aceita, a cada aviso de progresso e a cada claim/
+    # reivindicação -- nunca por uma simples consulta de status.
+    ultimo_progresso: Optional[float] = None
 
     # Buffer de resultados de página que já chegaram mas cuja vez ainda não
     # chegou (ver o cabeçalho do módulo).
@@ -207,6 +214,7 @@ class LoteState:
             "tentativa": self.tentativa,
             "lease_ate": self.lease_ate,
             "ultimo_heartbeat": self.ultimo_heartbeat,
+            "ultimo_progresso": self.ultimo_progresso,
             "paginas_recebidas": sorted(self.paginas_recebidas),
         }
 
@@ -233,6 +241,7 @@ class LoteState:
             tentativa=dados.get("tentativa", 0),
             lease_ate=dados.get("lease_ate"),
             ultimo_heartbeat=dados.get("ultimo_heartbeat"),
+            ultimo_progresso=dados.get("ultimo_progresso"),
             paginas_recebidas=set(dados.get("paginas_recebidas") or []),
         )
         estado.registros = armazenamento.ler_registros(estado.id) or []
@@ -420,7 +429,21 @@ def reenfileirar(estado: LoteState, motivo: str) -> None:
     um lease expirado custa segundos e não horas.
 
     A `tentativa` é incrementada: qualquer chamada do Worker anterior
-    passa a ser rejeitada (ver o comentário do campo).
+    passa a ser rejeitada (ver o comentário do campo) -- essa rejeição
+    acontece em `depositar_resultado_pagina`/`tentativa_valida`, contra o
+    valor ATUAL de `estado.tentativa`, nunca contra um valor congelado.
+
+    NÃO mexe em `estado.parar`. A thread-motora (`processar_lote`) é uma
+    ÚNICA thread por Job, do início ao fim -- ela só espera páginas
+    aparecerem (`_aguardar_resultado_pagina`), sem nenhuma noção de QUEM
+    as produziu; a ficha de cerca é inteiramente um cuidado do lado
+    PRODUTOR (rejeitar quem não é mais dono), não do lado consumidor.
+    Interromper a motora aqui já foi tentado e quebrava o caso mais
+    simples de todos: a PRIMEIRA reivindicação de um Job também incrementa
+    `tentativa` (0 -> 1, ver `reivindicar`), e uma motora que abortasse
+    nisso nunca aplicaria página nenhuma -- reproduzido durante esta
+    sub-fase, não hipotético (ver `teste_worker_api.py`, Bloco 6).
+    `estado.parar` continua existindo só para `cancelar()`.
     """
     with estado.lock:
         estado.tentativa += 1
@@ -430,7 +453,6 @@ def reenfileirar(estado: LoteState, motivo: str) -> None:
         estado.fase_worker = FASE_AGUARDANDO_WORKER
         estado.status = STATUS_PROCESSANDO
         estado.etapa_atual = f"Retomando o processamento ({motivo})"
-        estado.parar = True  # solta a thread-motora antiga, se houver
         estado.condicao.notify_all()
     persistir(estado)
 
@@ -458,8 +480,242 @@ def cancelar(estado: LoteState) -> None:
         estado.status = STATUS_CANCELADO
         estado.etapa_atual = ""
         estado.parar = True
+        # Mesma limpeza que a conclusão normal já faz (ver o fim de
+        # `processar_lote`) -- sem isto, um lote cancelado ainda em
+        # `FASE_AGUARDANDO_WORKER`/`FASE_ATRIBUIDO` continuaria contando
+        # como "esperando" ou "em processamento" em `resumo_jobs`, e um
+        # Worker que ainda não soube do cancelamento continuaria "dono"
+        # de um Job que não existe mais para efeitos práticos.
+        estado.fase_worker = FASE_LOCAL
+        estado.worker_id = None
+        estado.lease_ate = None
         estado.condicao.notify_all()
     persistir(estado, com_registros=True)
+
+
+# ---------------------------------------------------------------------------
+# Fase 26b: registro, claim atômico e renovação de lease -- o que os
+# endpoints de `rotas/worker.py` chamam. Nada aqui decide OCR nem
+# classificação; é só o protocolo de "quem está com qual Job".
+# ---------------------------------------------------------------------------
+
+def proximo_job_disponivel() -> Optional[str]:
+    """
+    O `lote_id` mais antigo aguardando um Worker, ou `None`. Só olha
+    `_lotes` em memória -- suficiente porque todo Job que pode ser
+    reivindicado já está lá: `criar_lote`/`enfileirar` colocam o lote em
+    `_lotes` na hora, e a varredura de inicialização já reidrata para
+    `_lotes` qualquer Job que estava em andamento antes de um reinício.
+    """
+    with _lotes_trava:
+        candidatos = list(_lotes.values())
+    disponiveis = []
+    for estado in candidatos:
+        with estado.lock:
+            if estado.fase_worker == FASE_AGUARDANDO_WORKER and estado.status == STATUS_PROCESSANDO:
+                disponiveis.append((estado.criado_em, estado.id))
+    if not disponiveis:
+        return None
+    disponiveis.sort()
+    return disponiveis[0][1]
+
+
+def resumo_jobs() -> Dict[str, int]:
+    """Contagens agregadas para `GET /api/worker/status` -- não vaza
+    `_lotes`/`_lotes_trava` para fora deste módulo; quem monta a resposta
+    HTTP só lê o dicionário devolvido aqui."""
+    with _lotes_trava:
+        candidatos = list(_lotes.values())
+    aguardando = em_processamento = concluidos = 0
+    for estado in candidatos:
+        with estado.lock:
+            # Mesma dupla condição de `proximo_job_disponivel` -- `fase_
+            # worker` sozinho não basta (um lote cancelado só é limpo em
+            # `cancelar`, e checar `status` também é o que evita depender
+            # só disso).
+            if estado.fase_worker == FASE_AGUARDANDO_WORKER and estado.status == STATUS_PROCESSANDO:
+                aguardando += 1
+            elif estado.fase_worker in (FASE_ATRIBUIDO, FASE_PROCESSANDO) and estado.status == STATUS_PROCESSANDO:
+                em_processamento += 1
+            elif estado.status == STATUS_CONCLUIDO:
+                concluidos += 1
+    return {
+        "jobs_aguardando_worker": aguardando,
+        "jobs_em_processamento": em_processamento,
+        "jobs_concluidos_recentes": concluidos,
+    }
+
+
+def reivindicar(estado: LoteState, worker_id: str) -> Optional[int]:
+    """
+    Claim atômico: só sai `FASE_AGUARDANDO_WORKER` para o worker que
+    chegou primeiro. Devolve a `tentativa` (a ficha de cerca desta
+    reivindicação) em caso de sucesso, ou `None` se o Job já não estava
+    mais disponível (outro Worker chegou antes -- quem chama devolve 409 e
+    o cliente tenta `GET /jobs/next` de novo).
+    """
+    agora = time.time()
+    with estado.lock:
+        if estado.fase_worker != FASE_AGUARDANDO_WORKER:
+            return None
+        estado.tentativa += 1
+        estado.worker_id = worker_id
+        estado.fase_worker = FASE_ATRIBUIDO
+        estado.lease_ate = agora + LEASE_S
+        estado.ultimo_heartbeat = agora
+        estado.ultimo_progresso = agora
+        estado.etapa_atual = "Um computador de leitura assumiu esta folha"
+        tentativa = estado.tentativa
+    persistir(estado)
+    return tentativa
+
+
+def tentativa_valida(estado: LoteState, worker_id: str, tentativa: int) -> bool:
+    """
+    Confere a ficha de cerca E o `worker_id`. As duas juntas: a ficha
+    sozinha impediria um Worker zumbi de uma tentativa VELHA, mas não
+    impediria um Worker totalmente ALHEIO de adulterar o Job de outro
+    dizendo "tentativa 1" por acaso -- ele precisa ser, ao mesmo tempo, o
+    dono ATUAL do Job.
+    """
+    with estado.lock:
+        return (
+            estado.fase_worker in (FASE_ATRIBUIDO, FASE_PROCESSANDO)
+            and estado.worker_id == worker_id
+            and estado.tentativa == tentativa
+        )
+
+
+def renovar_lease(estado: LoteState, worker_id: str, tentativa: int) -> bool:
+    """
+    Chamado pelo heartbeat do Worker (independente do laço de OCR -- ver
+    D6 no relatório desta fase) e, de bônus, por qualquer chamada de
+    progresso/entrega de página, já que estas também provam que o Worker
+    está vivo. Devolve `False` sem renovar nada quando o chamador não é
+    mais o dono do Job (lease já expirado e reenfileirado, ou nunca foi o
+    dono) -- o Worker deve então parar de trabalhar nesse Job.
+    """
+    if not tentativa_valida(estado, worker_id, tentativa):
+        return False
+    agora = time.time()
+    with estado.lock:
+        estado.lease_ate = agora + LEASE_S
+        estado.ultimo_heartbeat = agora
+        if estado.fase_worker == FASE_ATRIBUIDO:
+            # Primeira atividade real após o claim -- passa a PROCESSANDO
+            # (só cosmético para quem observa o Job; a thread-motora não
+            # depende disso).
+            estado.fase_worker = FASE_PROCESSANDO
+    persistir(estado)
+    return True
+
+
+def registrar_progresso_worker(estado: LoteState, worker_id: str, tentativa: int) -> None:
+    """Marca `ultimo_progresso` -- separado do heartbeat de propósito (ver
+    o campo em `LoteState`). Chamado a cada entrega de página aceita e a
+    cada aviso explícito de progresso do Worker."""
+    if not tentativa_valida(estado, worker_id, tentativa):
+        return
+    with estado.lock:
+        estado.ultimo_progresso = time.time()
+
+
+def liberar_apos_producao(estado: LoteState, worker_id: str, tentativa: int) -> bool:
+    """
+    O Worker sinaliza que já entregou todas as páginas que ia entregar
+    (`POST /jobs/{id}/concluir`). Isto NÃO conclui o Job -- quem decide
+    isso é a thread-motora, ao aplicar a última página -- só libera a
+    "posse" perante outros Workers, para o campo `fase_worker` não ficar
+    mostrando um dono que já terminou o trabalho dele.
+    """
+    if not tentativa_valida(estado, worker_id, tentativa):
+        return False
+    with estado.lock:
+        if estado.fase_worker in (FASE_ATRIBUIDO, FASE_PROCESSANDO):
+            estado.fase_worker = FASE_LOCAL
+    persistir(estado)
+    return True
+
+
+def marcar_falha_de_documento(estado: LoteState, worker_id: str, tentativa: int, mensagem: str) -> bool:
+    """
+    Falha do DOCUMENTO INTEIRO (arquivo que não abre, PDF sem páginas) --
+    equivalente ao que `produtor_ocr.produzir` já isolava quando rodava
+    localmente. A thread-motora está esperando páginas que nunca vão
+    chegar, então o Job precisa ser marcado aqui, não só a página.
+    """
+    if not tentativa_valida(estado, worker_id, tentativa):
+        return False
+    with estado.lock:
+        estado.status = STATUS_ERRO
+        estado.erro_fatal = mensagem
+        estado.parar = True
+        estado.condicao.notify_all()
+    persistir(estado, com_registros=True)
+    return True
+
+
+def varrer_leases_expirados(agora: Optional[float] = None) -> List[str]:
+    """
+    Devolve à fila todo Job cujo lease expirou OU cuja produção estagnou
+    (dois relógios independentes -- ver D6). Função PURA de varredura, sem
+    laço/sleep -- testável diretamente, sem esperar o relógio de verdade
+    passar. Quem faz o laço com intervalo é `_vigiar_leases_em_thread`,
+    abaixo, chamada pela thread de fundo do processo.
+    """
+    agora = agora or time.time()
+    with _lotes_trava:
+        candidatos = list(_lotes.values())
+    reenfileirados = []
+    for estado in candidatos:
+        with estado.lock:
+            em_posse = estado.fase_worker in (FASE_ATRIBUIDO, FASE_PROCESSANDO)
+            lease_venceu = em_posse and estado.lease_ate is not None and estado.lease_ate < agora
+            referencia_progresso = estado.ultimo_progresso or estado.criado_em
+            sem_progresso = (
+                em_posse and estado.fase_worker == FASE_PROCESSANDO
+                and (agora - referencia_progresso) > LIMITE_SEM_PROGRESSO_S
+            )
+        if lease_venceu:
+            reenfileirar(estado, "o computador de leitura parou de responder")
+            reenfileirados.append(estado.id)
+        elif sem_progresso:
+            reenfileirar(estado, "o computador de leitura ficou muito tempo sem enviar novidade")
+            reenfileirados.append(estado.id)
+    return reenfileirados
+
+
+_vigia_lock = threading.Lock()
+_vigia_iniciada = False
+_vigia_parar = threading.Event()
+
+# Intervalo entre varreduras -- bem menor que `LEASE_S`/`LIMITE_SEM_
+# PROGRESSO_S` para que a detecção nunca atrase por mais que este valor.
+_INTERVALO_VIGIA_S = 15.0
+
+
+def _vigiar_leases_em_thread() -> None:
+    while not _vigia_parar.wait(timeout=_INTERVALO_VIGIA_S):
+        try:
+            varrer_leases_expirados()
+        except Exception:
+            logging.exception("Falha na varredura de leases expirados")
+
+
+def iniciar_vigilante_de_leases() -> None:
+    """
+    Sobe a thread de fundo que aplica `varrer_leases_expirados`
+    periodicamente. Idempotente -- chamado a cada `startup` do FastAPI, e
+    os testes de backend criam um `TestClient(app)` por função, cada um
+    disparando o evento de novo; sem a trava isto acumularia uma thread
+    nova por teste.
+    """
+    global _vigia_iniciada
+    with _vigia_lock:
+        if _vigia_iniciada:
+            return
+        _vigia_iniciada = True
+    threading.Thread(target=_vigiar_leases_em_thread, daemon=True, name="vigia-leases").start()
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +744,9 @@ def depositar_resultado_pagina(estado: LoteState, numero: int, resultado: dict,
             return "duplicado"
         estado.paginas_recebidas.add(numero)
         estado.resultados_pagina[numero] = resultado
+        # Fase 26b: a entrega de uma página É produção -- prova de vida
+        # independente do heartbeat (ver D6 e `LoteState.ultimo_progresso`).
+        estado.ultimo_progresso = time.time()
         estado.condicao.notify_all()
     # Fora do lock: I/O de disco não precisa segurar quem está lendo status.
     try:
@@ -650,6 +909,15 @@ def processar_lote(lote_id: str) -> None:
     Thread-motora do Job: percorre as páginas EM ORDEM, espera o resultado
     de cada uma e classifica. Não roda OCR -- ver o cabeçalho do módulo.
 
+    Uma ÚNICA thread por Job, do início ao fim -- nunca reiniciada, mesmo
+    que o Job seja reenfileirado (`reenfileirar`) uma ou mais vezes no
+    meio do caminho. A ficha de cerca (`tentativa`) é assunto do lado
+    PRODUTOR (quem pode entregar página), não deste laço: ele só espera
+    pacientemente a página N aparecer, não importa quem/quantas
+    reivindicações tenham acontecido nesse meio tempo -- ver a nota em
+    `reenfileirar` sobre por que uma versão anterior comparava `tentativa`
+    aqui e quebrava a primeira reivindicação de todo Job.
+
     Uma falha inesperada aqui (fora do que já é isolado por página) marca o
     lote inteiro como STATUS_ERRO.
     """
@@ -659,7 +927,6 @@ def processar_lote(lote_id: str) -> None:
     with estado.lock:
         estado.status = STATUS_PROCESSANDO
         estado.parar = False
-        tentativa_desta_execucao = estado.tentativa
 
     try:
         total = _descobrir_total_paginas(estado)
@@ -668,12 +935,9 @@ def processar_lote(lote_id: str) -> None:
         for numero in range(1, total + 1):
             resultado = _aguardar_resultado_pagina(estado, numero)
             if resultado is None:
-                # Cancelado ou reenfileirado: sair sem concluir. Quem
-                # reenfileirou já ajustou o estado.
+                # Cancelado -- sair sem concluir (ver `cancelar`; um
+                # reenfileiramento NÃO cai aqui, a espera continua).
                 return
-            with estado.lock:
-                if estado.tentativa != tentativa_desta_execucao:
-                    return  # outra tentativa assumiu este Job
             _aplicar_resultado_pagina(estado, numero, resultado)
             persistir(estado)
 
