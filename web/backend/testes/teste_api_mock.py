@@ -1,14 +1,13 @@
 """
 web/backend/testes/teste_api_mock.py
 
-Fase 24a (Web MVP) -- suíte RÁPIDA dos endpoints, com PaddleOCR MOCKADO
-(mesmo padrão de `teste/teste_ui_integracao.py`: `MagicMock` no lugar do
-engine, resultados de OCR sintéticos, `DataManager` fake determinística
-para não depender do `dados/` real do operador, que é local e pode nem
-existir em outra máquina). Existe ao lado de `teste_api_lote_real.py`
-(OCR real, ~200 s) pela mesma razão que `teste_ui_integracao.py` existe ao
-lado de `teste_ocr.py`: uma suíte rápida que roda a cada alteração, e uma
-lenta que prova contra dado real antes de fechar a sub-fase.
+Fase 24a (Web MVP) -- suíte RÁPIDA dos endpoints, sem PaddleOCR (resultados
+de OCR sintéticos, `DataManager` fake determinística para não depender do
+`dados/` real do operador, que é local e pode nem existir em outra
+máquina). Existe ao lado de `teste_api_lote_real.py` (OCR real, ~200 s)
+pela mesma razão que `teste_ui_integracao.py` existe ao lado de
+`teste_ocr.py`: uma suíte rápida que roda a cada alteração, e uma lenta
+que prova contra dado real antes de fechar a sub-fase.
 
 Cobre o que o teste com OCR real não cobre (ou cobre caro demais para
 rodar a cada mudança): PROBLEMA C/D da revisão manual pela API, isolamento
@@ -17,25 +16,50 @@ aborta as demais), lote PDF multi-página, e os erros HTTP (404/409) que o
 teste real também cobre mas aqui ficam repetidos com mais variação porque
 é barato.
 
+Fase 26d: este arquivo passou a rodar com `LEITOR_MODO=servidor` -- o
+processo NÃO roda OCR nenhum (ver `web/backend/config.py`), exatamente o
+modo da VPS depois da Fase 26. Onde antes `estado._ocr_engine` era
+injetado direto com um `MagicMock`, agora `_WorkerFalso` fala o protocolo
+`/api/worker/*` DE VERDADE (mesmos endpoints que `worker/execucao.py` usa
+em produção), só dirigido SINCRONAMENTE pela própria thread do teste, sem
+`time.sleep`/polling do lado do Worker. `parse_registros`/`reparar_data_
+hora_mescladas` -- a mesma dupla que `pipeline.processar_uma_pagina` chama
+de verdade -- rodam de verdade sobre os `OCRResult` sintéticos; só o motor
+de OCR em si fica de fora (não haveria "OCR de mock" que valesse a pena).
+O protocolo em si (auth, claim, lease, fencing) já tem cobertura própria e
+mais funda em `teste_worker_api.py`; aqui ele é só o caminho real para
+exercitar classificação/revisão ponta a ponta pelo jeito que a VPS
+realmente processa um lote agora.
+
 Rodar (a partir da raiz do projeto, com o venv ativo):
     python web\\backend\\testes\\teste_api_mock.py
 """
 import os
 import sys
 import tempfile
-from unittest.mock import MagicMock
+import time
+from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "src"))
 
-import cv2
-import numpy as np
-import pymupdf as fitz
-from fastapi.testclient import TestClient
+# Fase 26d: precisa estar definido ANTES de qualquer chamada às rotas de
+# Worker (`config.modo()`/`auth_worker.token_configurado()` leem do
+# ambiente a cada chamada -- não há valor "congelado" no import, mas
+# fixar aqui, no topo, deixa explícito que o arquivo INTEIRO roda deste
+# jeito, não só alguns testes).
+TOKEN_WORKER_TESTE = "chave-de-teste-com-mais-de-16-caracteres"
+os.environ["LEITOR_WORKER_TOKEN"] = TOKEN_WORKER_TESTE
+os.environ["LEITOR_MODO"] = "servidor"
 
-from leitor_matriculas.ocr.engine import OCRResult
-from web.backend import armazenamento, estado
-from web.backend.main import app
+import pymupdf as fitz  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from leitor_matriculas.ocr.engine import OCRResult  # noqa: E402
+from leitor_matriculas.parsing.registro_parser import parse_registros  # noqa: E402
+from leitor_matriculas.pipeline import reparar_data_hora_mescladas  # noqa: E402
+from web.backend import armazenamento, estado  # noqa: E402
+from web.backend.main import app  # noqa: E402
 
 
 class _DataManagerFake:
@@ -105,36 +129,116 @@ def _resetar_estado_global():
         armazenamento.remover_lote(lote_id)
 
 
-def _preparar_imagem_valida(pasta, nome="folha.jpg"):
+def _preparar_arquivo_imagem(pasta, nome="folha.jpg"):
+    """Só precisa EXISTIR com a extensão certa -- o upload não valida
+    conteúdo (`criar_lote` decide o tipo só pela extensão do nome), e o
+    `_WorkerFalso` nunca abre o arquivo: os resultados de OCR vêm dos
+    fixtures sintéticos deste módulo, não de decodificar a imagem de
+    verdade (isso é papel de `worker/testes/teste_worker_real.py`, com
+    OCR real). Por isso deixou de precisar de OpenCV/numpy."""
     caminho = os.path.join(pasta, nome)
-    img = np.full((200, 900, 3), 255, dtype=np.uint8)
-    cv2.imwrite(caminho, img)
+    with open(caminho, "wb") as f:
+        f.write(b"\xff\xd8\xff-imagem-de-teste-sem-conteudo-real")
     return caminho
 
 
+class _WorkerFalso:
+    """
+    Fase 26d. O Worker de verdade que este arquivo usa para fazer o lote
+    avançar -- fala exatamente os mesmos endpoints HTTP que `worker/
+    execucao.py` fala em produção (`claim`, miniatura, resultado da
+    página, `concluir`, `erro`), só que:
+      - dirigido SINCRONAMENTE por esta classe, chamada pela thread do
+        teste -- nenhum `time.sleep`/laço de polling do lado do Worker;
+      - sem OCR: quem fornece os `OCRResult` é quem chama `entregar_
+        pagina`, com os fixtures sintéticos deste arquivo.
+    """
+
+    def __init__(self, client: TestClient, worker_id: str = "worker-falso"):
+        self._client = client
+        self._cabecalhos = {"Authorization": f"Bearer {TOKEN_WORKER_TESTE}", "X-Worker-Id": worker_id}
+
+    def reivindicar(self, lote_id: str) -> dict:
+        resp = self._client.post(f"/api/worker/jobs/{lote_id}/claim", headers=self._cabecalhos)
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    def entregar_pagina(self, lote_id: str, numero: int, tentativa: int, *,
+                         resultados_ocr: Optional[list] = None, erro: Optional[str] = None,
+                         fase_erro: Optional[str] = None, miniatura: Optional[bytes] = None) -> str:
+        # ORDEM IMPORTA: a miniatura sobe ANTES do resultado -- na última
+        # página, entregar o resultado pode fazer a VPS concluir o lote e
+        # liberar a posse antes da chamada seguinte deste mesmo Worker
+        # (mesmo cuidado de `teste_worker_api.py`).
+        if miniatura is not None:
+            resp = self._client.put(
+                f"/api/worker/jobs/{lote_id}/paginas/{numero}/miniatura",
+                params={"tentativa": tentativa}, content=miniatura, headers=self._cabecalhos,
+            )
+            assert resp.status_code == 204, resp.text
+
+        registros = []
+        if erro is None:
+            regs = parse_registros(resultados_ocr or []).registros
+            reparar_data_hora_mescladas(regs)
+            registros = [reg.como_dicionario() for reg in regs]
+
+        resp = self._client.post(
+            f"/api/worker/jobs/{lote_id}/paginas/{numero}",
+            json={"tentativa": tentativa, "erro": erro, "fase_erro": fase_erro, "registros": registros},
+            headers=self._cabecalhos,
+        )
+        assert resp.status_code == 202, resp.text
+        return resp.json()["resultado"]
+
+    def concluir(self, lote_id: str, tentativa: int) -> None:
+        resp = self._client.post(f"/api/worker/jobs/{lote_id}/concluir",
+                                 json={"tentativa": tentativa}, headers=self._cabecalhos)
+        assert resp.status_code == 204, resp.text
+
+    def erro_de_documento(self, lote_id: str, tentativa: int, mensagem: str) -> None:
+        resp = self._client.post(f"/api/worker/jobs/{lote_id}/erro",
+                                 json={"tentativa": tentativa, "mensagem": mensagem}, headers=self._cabecalhos)
+        assert resp.status_code == 204, resp.text
+
+
+def _processar_com_worker_falso(client: TestClient, lote_id: str, paginas: list) -> None:
+    """Reivindica o Job e entrega `paginas` em ordem -- cada item é um dict
+    com `numero` e, ou `resultados_ocr` (+ opcionalmente `miniatura`), ou
+    `erro`+`fase_erro`. Conclui ao final, como um Worker de verdade faria.
+    Não espera o lote terminar: a motora aplica cada página na PRÓPRIA
+    thread dela (`estado.processar_lote`); `_esperar_conclusao_sincrona`
+    continua sendo quem espera isso."""
+    worker = _WorkerFalso(client)
+    job = worker.reivindicar(lote_id)
+    tentativa = job["tentativa"]
+    for pagina in paginas:
+        worker.entregar_pagina(
+            lote_id, pagina["numero"], tentativa,
+            resultados_ocr=pagina.get("resultados_ocr"), erro=pagina.get("erro"),
+            fase_erro=pagina.get("fase_erro"), miniatura=pagina.get("miniatura"),
+        )
+    worker.concluir(lote_id, tentativa)
+
+
 def _esperar_conclusao_sincrona(client, lote_id, tentativas=100):
-    """Com o engine mockado o processamento é quase instantâneo -- ainda
-    assim roda numa thread separada (o código de produção não sabe que
-    está sendo testado), então esperamos igual, só que por muito menos
-    tempo que o teste com OCR real."""
-    import time
+    """Sem OCR real, a motora aplica cada página quase instantaneamente --
+    ainda assim ela roda numa thread separada (o código de produção não
+    sabe que está sendo testado), então esperamos igual, só que por muito
+    menos tempo que o teste com OCR real."""
     for _ in range(tentativas):
         status = client.get(f"/lotes/{lote_id}/status").json()
         if status["status"] in (estado.STATUS_CONCLUIDO, estado.STATUS_ERRO):
             return status
         time.sleep(0.05)
-    raise TimeoutError(f"Lote '{lote_id}' não concluiu (mock) -- possível trava no worker")
+    raise TimeoutError(f"Lote '{lote_id}' não concluiu (worker falso) -- possível trava na motora")
 
 
 def teste_fluxo_imagem_unica():
     print("=== Teste 1: upload de 1 imagem -> processar -> registros -> confirmar -> exportar ===")
     _resetar_estado_global()
     tmp = tempfile.mkdtemp(prefix="teste_api_mock_")
-    caminho = _preparar_imagem_valida(tmp)
-
-    fake_engine = MagicMock()
-    fake_engine.recognize.return_value = RESULTADOS_OCR
-    estado._ocr_engine = fake_engine
+    caminho = _preparar_arquivo_imagem(tmp)
     estado._data_manager = _DataManagerFake()
 
     client = TestClient(app)
@@ -146,6 +250,7 @@ def teste_fluxo_imagem_unica():
 
     resp = client.post(f"/lotes/{lote_id}/processar")
     assert resp.status_code == 202, resp.text
+    _processar_com_worker_falso(client, lote_id, [{"numero": 1, "resultados_ocr": RESULTADOS_OCR}])
     status = _esperar_conclusao_sincrona(client, lote_id)
     assert status["status"] == estado.STATUS_CONCLUIDO
     assert status["paginas_com_erro"] == 0
@@ -199,11 +304,7 @@ def teste_explicacao_e_imagem_pagina():
     print("=== Teste 5 (24c): GET .../explicacao e GET .../paginas/{n}/imagem ===")
     _resetar_estado_global()
     tmp = tempfile.mkdtemp(prefix="teste_api_mock_")
-    caminho = _preparar_imagem_valida(tmp)
-
-    fake_engine = MagicMock()
-    fake_engine.recognize.return_value = RESULTADOS_OCR
-    estado._ocr_engine = fake_engine
+    caminho = _preparar_arquivo_imagem(tmp)
     estado._data_manager = _DataManagerFake()
 
     client = TestClient(app)
@@ -211,6 +312,9 @@ def teste_explicacao_e_imagem_pagina():
         resp = client.post("/lotes", files={"files": (os.path.basename(caminho), f, "image/jpeg")})
     lote_id = resp.json()["lote_id"]
     client.post(f"/lotes/{lote_id}/processar")
+    _processar_com_worker_falso(client, lote_id, [
+        {"numero": 1, "resultados_ocr": RESULTADOS_OCR, "miniatura": b"\xff\xd8\xff-jpeg-de-teste"},
+    ])
     _esperar_conclusao_sincrona(client, lote_id)
 
     registros = client.get(f"/lotes/{lote_id}/registros").json()
@@ -242,7 +346,7 @@ def teste_explicacao_e_imagem_pagina():
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "image/jpeg"
     assert len(resp.content) > 0
-    print(f"  OK: GET .../paginas/1/imagem -- {len(resp.content)} bytes JPEG")
+    print(f"  OK: GET .../paginas/1/imagem -- {len(resp.content)} bytes JPEG (entregues pelo Worker falso)")
 
     resp = client.get(f"/lotes/{lote_id}/paginas/999/imagem")
     assert resp.status_code == 404
@@ -254,15 +358,11 @@ def teste_isolamento_falha_lote_imagens():
     print("=== Teste 2: lote de imagens com 1 arquivo corrompido no meio -- isola, não aborta (Fase 7) ===")
     _resetar_estado_global()
     tmp = tempfile.mkdtemp(prefix="teste_api_mock_")
-    caminho_a = _preparar_imagem_valida(tmp, "a.jpg")
+    caminho_a = _preparar_arquivo_imagem(tmp, "a.jpg")
     caminho_corrompido = os.path.join(tmp, "b.jpg")
     with open(caminho_corrompido, "wb") as f:
         f.write(b"isto nao e uma imagem valida")
-    caminho_c = _preparar_imagem_valida(tmp, "c.jpg")
-
-    fake_engine = MagicMock()
-    fake_engine.recognize.return_value = RESULTADOS_OCR
-    estado._ocr_engine = fake_engine
+    caminho_c = _preparar_arquivo_imagem(tmp, "c.jpg")
     estado._data_manager = _DataManagerFake()
 
     client = TestClient(app)
@@ -279,6 +379,17 @@ def teste_isolamento_falha_lote_imagens():
     assert resp.json()["total_arquivos"] == 3
 
     client.post(f"/lotes/{lote_id}/processar")
+    # A página 2 (b.jpg) é quem, num Worker de verdade, falharia ao abrir
+    # o arquivo (`worker/execucao.py::_ler_imagem`) -- aqui simulamos essa
+    # falha diretamente, exatamente como o Worker a reportaria: `erro` cru
+    # e `fase_erro="leitura"`. A frase final ("Falha ao abrir 'b.jpg': ...")
+    # é montada do lado da VPS (D8), não pelo Worker -- ver `estado.
+    # _mensagem_erro_pagina`.
+    _processar_com_worker_falso(client, lote_id, [
+        {"numero": 1, "resultados_ocr": RESULTADOS_OCR},
+        {"numero": 2, "erro": "não foi possível decodificar a imagem", "fase_erro": "leitura"},
+        {"numero": 3, "resultados_ocr": RESULTADOS_OCR},
+    ])
     status = _esperar_conclusao_sincrona(client, lote_id)
     assert status["status"] == estado.STATUS_CONCLUIDO
     assert status["paginas_com_erro"] == 1, status
@@ -304,10 +415,6 @@ def teste_lote_pdf_multipagina():
         doc.new_page(width=600, height=800)
     doc.save(caminho_pdf)
     doc.close()
-
-    fake_engine = MagicMock()
-    fake_engine.recognize.return_value = RESULTADOS_OCR
-    estado._ocr_engine = fake_engine
     estado._data_manager = _DataManagerFake()
 
     client = TestClient(app)
@@ -318,6 +425,11 @@ def teste_lote_pdf_multipagina():
     assert resp.json()["tipo"] == "pdf"
 
     client.post(f"/lotes/{lote_id}/processar")
+    _processar_com_worker_falso(client, lote_id, [
+        {"numero": 1, "resultados_ocr": RESULTADOS_OCR},
+        {"numero": 2, "resultados_ocr": RESULTADOS_OCR},
+        {"numero": 3, "resultados_ocr": RESULTADOS_OCR},
+    ])
     status = _esperar_conclusao_sincrona(client, lote_id)
     assert status["status"] == estado.STATUS_CONCLUIDO
     assert status["total_paginas"] == 3
@@ -349,7 +461,7 @@ def main():
     teste_lote_pdf_multipagina()
     teste_erros_http()
     print("=" * 70)
-    print("TESTE DE API COM OCR MOCKADO (SUB-FASES 24a/24c): TUDO OK")
+    print("TESTE DE API SEM OCR, PELO PROTOCOLO DE WORKER DE VERDADE (SUB-FASES 24a/24c/26d): TUDO OK")
 
 
 if __name__ == "__main__":

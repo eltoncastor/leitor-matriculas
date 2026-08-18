@@ -81,6 +81,11 @@ preferencias_ui.json
 # .env.example, sem nenhum segredo real.
 .env
 
+# Configuracao da API na VPS (Fase 26e, systemd EnvironmentFile) -- mesmo
+# motivo do .env acima. deploy/leitor-api.env.example fica versionado,
+# sem segredo nenhum.
+/deploy/leitor-api.env
+
 # Empacotamento .exe (Sub-fase 25b): saída gerada pelo PyInstaller a partir
 # de web/desktop_app.spec -- binário grande, reproduzível a qualquer momento
 # rodando o build de novo (ver web/README.md), nunca deve ser versionado.

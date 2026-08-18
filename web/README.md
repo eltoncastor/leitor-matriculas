@@ -170,6 +170,85 @@ de verdade, não simulado) -- baseline **40 registros, 19 CONFIRMADO, 21 REVISAO
 via Tailscale; ver `saida/auditoria_fase26_ocr_worker.md` (Sub-fase 26c) para a justificativa completa
 dessa separação.
 
+## Colocando em produção: VPS + Worker Windows (Fase 26e)
+
+Passo a passo para o par completo — API em modo `servidor` na VPS (Oracle Cloud, já publicada em
+`https://eltonmarques.com/leitor` desde a Fase 25, ver "Deploy atrás de sub-path" abaixo) mais um
+Worker real no PC Windows do operador. **Nenhum destes passos foi executado contra a VPS real nem
+contra um PC físico a partir deste repositório** -- o que existe até aqui (26a/26b/26c) foi verificado
+ponta a ponta com um servidor e um cliente HTTP reais, no mesmo processo/máquina (`worker/testes/
+teste_worker_real.py`); a validação **entre duas máquinas distintas** exige acesso à VPS e ao PC de
+verdade, que só o operador tem. Esta seção é o roteiro para ele executar essa validação, não um
+relato de que ela já aconteceu.
+
+### 1. Na VPS -- instalar e configurar
+
+```bash
+# clonar/atualizar o repositório, então:
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements-api.txt   # NUNCA requirements.txt inteiro -- sem OpenCV/PaddleOCR aqui
+```
+
+Criar `deploy/leitor-api.env` (a partir de `deploy/leitor-api.env.example`, ver os comentários lá
+dentro para o que cada variável faz) com `LEITOR_MODO=servidor`, `LEITOR_WORKER_TOKEN` (um segredo
+gerado agora, ≥16 caracteres -- ex. `openssl rand -hex 24`) e `LEITOR_ARMAZENAMENTO` apontando para
+uma pasta **fora** do checkout do repositório (precisa sobreviver a um `git pull`/deploy novo):
+
+```bash
+cp deploy/leitor-api.env.example deploy/leitor-api.env
+nano deploy/leitor-api.env
+chmod 600 deploy/leitor-api.env
+```
+
+### 2. Na VPS -- manter o processo vivo (systemd)
+
+Antes desta fase não havia registro, no repositório, de COMO o processo da VPS é mantido rodando
+entre reinícios -- essa era uma pergunta explicitamente em aberto no início da Fase 26 (ver
+`saida/auditoria_fase26_ocr_worker.md`). `deploy/leitor-api.service` é um **modelo** de unit do
+systemd para isso -- reinicia sozinho em crash e sobrevive a um reboot da VPS. Ele parte do princípio
+de que nada assim existia ainda; se a VPS já tiver algum mecanismo próprio (outro systemd unit, PM2,
+supervisor, tmux manual), prefira integrar a esse mecanismo existente em vez de rodar os dois em
+paralelo -- é o operador quem sabe qual é o caso, por isso o modelo não se autoinstala.
+
+```bash
+sudo cp deploy/leitor-api.service /etc/systemd/system/leitor-api.service
+sudo nano /etc/systemd/system/leitor-api.service   # ajustar User/WorkingDirectory/caminhos
+sudo systemctl daemon-reload
+sudo systemctl enable --now leitor-api
+sudo systemctl status leitor-api                   # deve mostrar "active (running)"
+sudo journalctl -u leitor-api -f                   # acompanhar os logs ao vivo
+```
+
+Confirme que a Tailscale já está ativa na VPS (`tailscale status`) -- é o caminho que o Worker vai
+usar para alcançá-la (ver "Ajuste pontual pós-Fase 24" em `saida/ajuste_acesso_tailscale.md`; as
+rotas `/api/worker/*` nunca ficam expostas pelo Cloudflare Tunnel/domínio público, só sob `/leitor`
+-- ver "Protocolo de Worker" acima).
+
+### 3. No PC Windows -- Worker
+
+Seguir a seção "Worker Windows (Fase 26c)" acima, com `API_BASE_URL` apontando para o **IP Tailscale
+da VPS** (`tailscale ip -4` rodado NA VPS) e `OCR_WORKER_TOKEN` igual ao `LEITOR_WORKER_TOKEN` do
+passo 1. Rodar `python -m worker` (ou `iniciar_worker.bat`) e conferir no log `[Worker] registrado`
+sem erro de autenticação.
+
+### 4. Validação ponta a ponta (fazer isto de verdade, uma vez, antes de considerar a fase fechada)
+
+- [ ] Upload de um lote pelo navegador (`https://eltonmarques.com/leitor`), **sem** o Worker rodando
+      ainda -- o lote deve ficar "Aguardando um computador de leitura..." (Fase 26d) indefinidamente,
+      sem erro.
+- [ ] Ligar o Worker -- o lote deve sair do estado de espera sozinho, sem recarregar a página nem
+      disparar nada manualmente.
+- [ ] Acompanhar `GET /api/worker/status` (`curl http://<ip-tailscale-vps>:8000/api/worker/status`)
+      durante o processamento -- contagens batendo com a realidade.
+- [ ] Resultado final aparece na tela de Resultado, planilha baixável, revisão manual funcionando.
+- [ ] Desligar o Worker (`Ctrl+C`) NO MEIO de um lote -- a VPS e o frontend continuam de pé, o lote
+      fica pendente (não trava, não vira erro).
+- [ ] Religar o Worker -- o lote retoma sozinho, **sem refazer o OCR das páginas já lidas**
+      (`etapa_atual` deve mostrar "Retomando o processamento").
+- [ ] Reiniciar o processo da VPS (`sudo systemctl restart leitor-api`) com um lote em andamento --
+      mesmo comportamento de retomada, agora do lado da VPS.
+
 ## Frontend (Fase 24b)
 
 React + Tailwind v4 (Vite), em `web/frontend/`. Precisa do backend acima rodando em

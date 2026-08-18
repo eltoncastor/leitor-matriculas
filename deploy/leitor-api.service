@@ -1,0 +1,54 @@
+# deploy/leitor-api.service
+#
+# Fase 26e. Modelo de unit do systemd para manter `web/backend/main.py`
+# (modo `servidor`, ver `web/backend/config.py`) vivo na VPS -- reinicia
+# sozinho se o processo cair, e sobe de novo depois de um reboot.
+#
+# Este arquivo é um MODELO: os caminhos abaixo (`/opt/leitor_matriculas`,
+# usuário `leitor`) são exemplos e PRECISAM ser ajustados para a VPS real
+# antes de instalar. Nenhum segredo (`LEITOR_WORKER_TOKEN`) vai aqui dentro
+# -- fica no `EnvironmentFile`, um arquivo separado, fora do Git, com
+# permissão restrita (ver o passo a passo em `web/README.md`, seção
+# "Produção (Fase 26e)").
+#
+# Instalar (como root, na VPS):
+#   sudo cp deploy/leitor-api.service /etc/systemd/system/leitor-api.service
+#   sudo nano /etc/systemd/system/leitor-api.service   # ajustar caminhos/usuário
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now leitor-api
+#
+# Ver status/logs:
+#   sudo systemctl status leitor-api
+#   sudo journalctl -u leitor-api -f
+
+[Unit]
+Description=Leitor de Matriculas -- API web (modo servidor, Fase 26)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=leitor
+Group=leitor
+WorkingDirectory=/opt/leitor_matriculas
+
+# Arquivo com LEITOR_MODO=servidor, LEITOR_WORKER_TOKEN, LEITOR_ARMAZENAMENTO
+# -- ver o modelo em `deploy/leitor-api.env.example`. Permissão restrita:
+#   chmod 600 /opt/leitor_matriculas/deploy/leitor-api.env
+EnvironmentFile=/opt/leitor_matriculas/deploy/leitor-api.env
+
+ExecStart=/opt/leitor_matriculas/venv/bin/python web/backend/main.py
+
+# Reinicia sozinho em caso de crash -- nunca em caso de "parado de
+# propósito" (systemctl stop). Backoff simples pra não entrar em loop de
+# reinício rápido se a causa for persistente (ex.: porta 8000 ocupada).
+Restart=on-failure
+RestartSec=5
+
+# --workers>1 continua PROIBIDO (ver CLAUDE.md, D2 da Fase 26): o backend
+# é single-process por construção -- `Type=simple` com um único
+# `ExecStart` já garante isso; nunca trocar por `Type=forking`/múltiplas
+# instâncias.
+
+[Install]
+WantedBy=multi-user.target
