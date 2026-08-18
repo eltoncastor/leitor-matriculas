@@ -1,227 +1,320 @@
 # Leitor de Matrículas Manuscritas
 
-Ferramenta desktop para Windows, desenvolvida em Python/Tkinter (com `ttkbootstrap` para o tema visual), que transforma fotos ou PDFs das folhas físicas de liberação do cartão mestre em uma planilha XLSX estruturada.
+Sistema para extrair dados manuscritos de fotos ou PDFs de folhas de liberação do cartão mestre e gerar uma planilha XLSX estruturada.
 
-O sistema utiliza OCR com PaddleOCR para reconhecer os dados manuscritos, valida as informações contra bases XLSX e envia automaticamente para revisão manual os casos que não podem ser confirmados com segurança.
+O processamento utiliza **PaddleOCR**, com validação contra bases XLSX locais. Registros que não podem ser confirmados com segurança são encaminhados para **revisão manual**.
+
+O mesmo núcleo de processamento é utilizado pelas interfaces **Desktop** e **Web**. Quando necessário, o OCR pode ser executado por um **Worker Windows** separado.
 
 ```text
-FOTO ou PDF
-    ↓
-Pré-processamento (OpenCV)
-    ↓
-OCR (PaddleOCR)
-    ↓
+FOTO/PDF
+   ↓
+Pré-processamento
+   ↓
+OCR
+   ↓
 Parser espacial
-    ↓
+   ↓
 Data | Hora | Matrícula | Motivo | Responsável
-    ↓
+   ↓
 Validação
-    ↓
+   ↓
 CONFIRMADO / REVISÃO
-    ↓
-Planilha XLSX
+   ↓
+XLSX
 ```
+
+Uma falha no processamento de uma página gera `ERRO` de página e não interrompe o lote.
 
 ---
 
-## Dados reconhecidos
+## Interfaces
 
-A extração principal trabalha somente com os campos existentes na folha:
+### Desktop
 
-```text
-Data
-Hora
-Matrícula
-Motivo
-Responsável
+Interface original em **Tkinter + ttkbootstrap**.
+
+```powershell
+python main.py
 ```
 
-### Nome e Setor
+É mantida para correções e manutenção.
 
-**Nome e Setor não são reconhecidos por OCR.**
+### Web
 
-Esses dados não fazem parte do resultado principal da extração e podem ser obtidos posteriormente a partir da matrícula, por exemplo utilizando `PROCX/XLOOKUP` em outra planilha.
+Localizada em `web/`, utiliza **React + Tailwind** no frontend e **FastAPI** no backend.
 
-Essa abordagem evita processamento desnecessário e reduz o risco de associar uma pessoa incorreta a uma matrícula.
+Pode funcionar:
+
+* no navegador;
+* como aplicativo desktop via `pywebview`;
+* como `.exe` portátil;
+* com OCR local;
+* com OCR executado por Worker Windows separado.
+
+### Worker Windows
+
+Processo separado para executar o OCR quando o backend opera em modo servidor.
+
+A arquitetura permite:
+
+```text
+Backend / VPS
+    ↓
+coordenação e Jobs
+    ↓
+Worker Windows
+    ↓
+OCR + pipeline
+    ↓
+resultado
+```
+
+O Worker utiliza o mesmo núcleo de processamento do sistema.
+
+Detalhes de Web, Worker, execução remota e empacotamento estão em [`web/README.md`](web/README.md).
+
+---
+
+## Campos reconhecidos
+
+O OCR trabalha somente com:
+
+* **Data**
+* **Hora** *(opcional)*
+* **Matrícula**
+* **Motivo**
+* **Responsável**
+
+**Nome e Setor não são extraídos da folha por OCR.** Eles podem ser obtidos posteriormente pela matrícula, usando a base de colaboradores e ferramentas como `PROCX/XLOOKUP`.
 
 ### Hora
 
-A Hora é um campo **opcional**.
+A Hora é opcional.
 
-Se Data + Matrícula + Motivo + Responsável forem confirmados, a ausência ou ilegibilidade da Hora não impede a confirmação do registro.
+Se Data, Matrícula, Motivo e Responsável forem confirmados, a ausência ou ilegibilidade da Hora não impede a confirmação.
 
-Quando a Hora não puder ser reconhecida com segurança:
+Quando não puder ser validada:
 
 ```text
 Hora = vazia
 ```
 
-O sistema nunca inventa uma hora.
-
-Isso vale tanto para a Hora **ausente** quanto para a Hora **ilegível**. Nos dois casos o registro pode ser `CONFIRMADO` normalmente.
-
-Uma hora ilegível nunca é escrita na planilha: o texto reconhecido pelo OCR seria indistinguível de uma hora real. Mas ele também não é descartado — fica registrado na coluna `Observação`, para auditoria.
-
-Exemplo fictício:
-
-```text
-OCR na coluna HORA:  25:99
-Resultado:
-    Hora       = (vazia)
-    Status     = CONFIRMADO
-    Observação = hora ilegível, exportada em branco (texto do OCR: '25:99')
-```
-
-Quando a Hora existe e é legível, ela é preservada normalmente.
+O sistema nunca inventa uma hora. O texto original do OCR permanece registrado em `Observação`.
 
 ### Responsável
 
-O campo Responsável representa o gestor que autorizou a liberação.
+Representa o gestor que autorizou a liberação.
 
-Algumas folhas podem conter texto adicional após o gestor. Quando o gestor é identificado com segurança, esse texto residual desconhecido é ignorado.
+Quando o gestor é identificado com segurança, texto residual desconhecido é ignorado.
 
-Exemplo fictício:
-
-```text
-OCR:
-GRX - GESTOR EXEMPLO - TEXTO_RESIDUAL
-
-Resultado:
-Responsável = GRX - GESTOR EXEMPLO
-```
-
-O sistema não tenta identificar ou corrigir o texto residual.
-
-Nomes compostos e códigos de gestores são preservados.
-
-Exemplos fictícios:
-
-```text
-GRX - GESTOR EXEMPLO
-GRY - OUTRO GESTOR
-GESTOR EXEMPLO
-NOME COMPOSTO EXEMPLO
-```
-
-Quando o gestor não puder ser identificado com segurança, o registro é enviado para `REVISÃO`.
+Se o responsável não puder ser identificado com segurança, o registro permanece em `REVISÃO`.
 
 ---
 
-## Arquitetura atual
+## Arquitetura
 
-O código-fonte fica em `src/leitor_matriculas/`, organizado por **responsabilidade**:
+O núcleo está em `src/leitor_matriculas/` e é compartilhado pelas interfaces.
 
 ```text
-leitor_matriculas/
-├── main.py                     ponto de entrada (python main.py)
-│
+.
+├── main.py
 ├── src/
 │   └── leitor_matriculas/
-│       ├── ocr/                entrada visual
-│       │   ├── image_processor.py
-│       │   ├── engine.py
-│       │   └── pdf_reader.py
-│       ├── parsing/            reconstrução dos registros
-│       │   ├── registro_parser.py
-│       │   ├── tempo_parser.py
-│       │   └── contexto_lote.py
-│       ├── validacao/          classificação dos registros
-│       │   ├── regras.py
-│       │   ├── correspondencia_aproximada.py
-│       │   └── recuperacao_matricula.py
-│       ├── dados/              bases XLSX de apoio
-│       │   └── data_manager.py
-│       ├── exportacao/         geração da saída
-│       │   ├── xlsx_exporter.py
-│       │   └── csv_exporter.py
-│       └── ui/                 interface Tkinter
-│           └── app.py
-│
-├── dados/                      bases reais (locais, fora do Git)
-│   ├── LEIA-ME.txt
-│   ├── Colaboradores.xlsx
-│   ├── Gestores.xlsx
-│   └── Motivos.xlsx
-│
-├── entrada/                    fotos/PDFs reais (locais, fora do Git)
-├── saida/                      planilhas geradas (locais, fora do Git)
-├── teste/
-├── requirements.txt
-└── README.md
+│       ├── pipeline.py
+│       ├── ocr/
+│       ├── parsing/
+│       ├── validacao/
+│       ├── dados/
+│       ├── exportacao/
+│       └── ui/
+├── web/
+│   ├── backend/
+│   ├── frontend/
+│   └── desktop_app.py
+├── worker/
+├── dados/
+├── entrada/
+├── saida/
+└── teste/
 ```
 
-A dependência é de mão única — `ocr → parsing → validacao → exportacao`, com `ui` por cima de todos. Nenhum módulo de baixo importa um de cima, o que mantém o grafo acíclico.
+O fluxo de execução é:
 
-O projeto roda direto do diretório, sem instalação via `pip`: o `main.py` acrescenta `src/` ao `sys.path` antes de importar o pacote.
+```text
+OCR → Parsing → Validação → Exportação
+```
+
+`pipeline.py` coordena o processamento de uma folha.
+
+As interfaces ficam acima do núcleo:
+
+```text
+Tkinter ──────┐
+              ├──→ pipeline.py
+Web Backend ──┘
+```
+
+Os módulos são organizados por responsabilidade e mantêm dependências em uma única direção, evitando que camadas inferiores dependam das interfaces.
 
 ---
 
-## Principais módulos
+## Estados do processamento
 
-| Módulo                                            | Responsabilidade                                         |
-| ------------------------------------------------- | -------------------------------------------------------- |
-| `main.py`                                          | Ponto de entrada                                         |
-| `ui/app.py`                                        | Interface gráfica (abas Registros/Revisão/Avisos) e coordenação do processamento |
-| `ocr/engine.py`                                    | Inicialização e execução do PaddleOCR                    |
-| `ocr/image_processor.py`                           | Pré-processamento das imagens                            |
-| `ocr/pdf_reader.py`                                | Renderização de PDFs página por página                   |
-| `parsing/registro_parser.py`                       | Agrupamento espacial dos elementos OCR em registros      |
-| `parsing/tempo_parser.py`                          | Interpretação e validação de Data/Hora                   |
-| `parsing/contexto_lote.py`                         | Contexto do lote (ano das datas já lidas)                |
-| `dados/data_manager.py`                            | Carregamento das bases XLSX                              |
-| `validacao/correspondencia_aproximada.py`          | Correspondência aproximada controlada                    |
-| `validacao/recuperacao_matricula.py`               | Recuperação da matrícula para dígitos                    |
-| `validacao/regras.py`                              | Classificação dos registros                              |
-| `exportacao/xlsx_exporter.py`                      | Geração da planilha XLSX                                 |
-| `exportacao/csv_exporter.py`                       | Exportação CSV legada (não ligada à interface)           |
+O sistema diferencia **registro** de **página**.
 
-Os caminhos acima são relativos a `src/leitor_matriculas/`.
+### Registro
+
+**`CONFIRMADO`**
+
+Dados necessários identificados e validados com segurança.
+
+**`REVISÃO`**
+
+Alguma informação necessária não pôde ser confirmada com segurança.
+
+### Página
+
+**`PROCESSADA`**
+
+Processamento concluído, podendo conter registros em revisão.
+
+**`ERRO`**
+
+Falha de processamento da página inteira, como erro de leitura da imagem, pré-processamento, OCR ou renderização do PDF.
+
+Uma página em `ERRO` não vai para revisão manual e não interrompe o restante do lote.
+
+---
+
+## Validação
+
+### CONFIRMADO
+
+A confirmação exige:
+
+* matrícula presente, somente com dígitos e validada na base;
+* data válida;
+* motivo reconhecido;
+* responsável identificado na base de gestores;
+* bases necessárias disponíveis;
+* normalizações e correspondências sustentadas por evidência suficiente.
+
+A Hora **não é obrigatória**.
+
+Motivo e Responsável **são obrigatórios**.
+
+### REVISÃO
+
+Exemplos:
+
+* matrícula ilegível, ausente, não encontrada ou ambígua;
+* gestor ambíguo ou irreconhecível;
+* motivo não reconhecido;
+* data inválida ou inconsistente;
+* motivo ou responsável ausentes;
+* evidência insuficiente.
+
+Uma normalização em um único campo nunca confirma o registro sozinha.
+
+O sistema prefere `REVISÃO` a inventar ou associar dados sem evidência suficiente.
+
+---
+
+## Recuperações e normalizações
+
+O sistema trata apenas deformações previsíveis do OCR.
+
+```text
+Leitura OCR
+   ↓
+Possíveis normalizações
+   ↓
+Validação contra base/contexto
+   ↓
+uma possibilidade válida → aceita
+mais de uma              → REVISÃO
+nenhuma                  → REVISÃO
+```
+
+O sistema não escolhe simplesmente o candidato mais parecido quando existe ambiguidade.
+
+Toda normalização aceita fica registrada em `Observação`.
+
+### Motivo
+
+Há tratamento específico para a família `HORÁRIO NEGADO`, com recuperação de deformações conhecidas e comparação contra a lista fechada de motivos.
+
+### Responsável
+
+Códigos e identificações de gestores são validados contra `Gestores.xlsx`.
+
+Ambiguidade leva a `REVISÃO`.
+
+### Data e Hora
+
+Datas são exportadas em `DD/MM/AA`.
+
+Horas válidas são exportadas em `HH:MM`.
+
+Separadores deformados podem ser normalizados quando a leitura for inequívoca.
+
+Valores impossíveis são recusados.
+
+### Matrícula
+
+A matrícula exportada contém exclusivamente dígitos (`0-9`).
+
+Caracteres suspeitos não são simplesmente apagados. Leituras alternativas são verificadas contra `Colaboradores.xlsx`.
+
+Se nenhuma leitura puder ser confirmada, a matrícula permanece vazia e o registro vai para `REVISÃO`.
+
+### Contexto do lote
+
+O lote pode fornecer o **ano** de uma data sem ano quando houver evidência suficiente nas demais páginas.
+
+As regras são conservadoras:
+
+* somente datas completas alimentam o contexto;
+* datas recuperadas pelo contexto não o realimentam;
+* o ano precisa ser predominante com segurança;
+* um lote que atravessa a virada do ano não escolhe automaticamente um ano;
+* ano divergente permanece em `REVISÃO`;
+* o contexto é reiniciado a cada lote.
+
+---
+
+## Ordem dos registros
+
+A ordem física das liberações na folha é preservada.
+
+O sistema não ordena os registros por nome, matrícula, gestor, motivo ou data.
+
+Isso permite conferir a planilha diretamente contra o documento físico.
 
 ---
 
 ## Bases de dados
 
-As bases utilizadas pelo sistema ficam em:
+As bases operacionais ficam em `dados/`:
 
 ```text
-dados/
-├── Colaboradores.xlsx
-├── Gestores.xlsx
-└── Motivos.xlsx
+Colaboradores.xlsx
+Gestores.xlsx
+Motivos.xlsx
 ```
-
-Esses arquivos contêm dados operacionais e devem ser tratados como **dados locais e sensíveis**.
-
-Eles **não fazem parte do repositório público**.
 
 ### Colaboradores.xlsx
 
-Utilizada para validação da matrícula.
-
-O sistema não precisa reconhecer Nome ou Setor por OCR.
-
-A matrícula reconhecida pode ser utilizada posteriormente para obter essas informações em uma base de colaboradores.
+Valida matrículas e fornece dados derivados da matrícula, como Nome e Setor.
 
 ### Gestores.xlsx
 
-Contém os gestores e suas possíveis formas de identificação.
-
-Uma mesma pessoa pode possuir diferentes formas válidas de identificação, como:
-
-```text
-CÓDIGO - NOME
-CÓDIGO
-NOME
-NOME ABREVIADO
-```
-
-Essas formas podem representar aliases ou identificadores alternativos e não necessariamente pessoas diferentes.
+Contém gestores e suas formas válidas de identificação.
 
 ### Motivos.xlsx
 
-Contém os motivos válidos utilizados na validação e na correspondência aproximada controlada.
-
-A lista de motivos é **fechada**. Nesta versão do sistema, os únicos motivos válidos são:
+Contém a lista fechada de motivos:
 
 ```text
 HORÁRIO NEGADO
@@ -233,13 +326,15 @@ ESQUECEU CRACHÁ
 TREINAMENTO
 ```
 
-O campo `Motivo` de um registro `CONFIRMADO` sempre contém um desses valores — o sistema não cria motivos novos nem exporta ruído de OCR como motivo confirmado.
+`NEGADO` e `NEGADA` são normalizados para `HORÁRIO NEGADO`.
 
-`NEGADO` e `NEGADA` **não são motivos independentes** nesta versão: quando reconhecidos, são normalizados para `HORÁRIO NEGADO`.
+As bases reais são locais e não fazem parte do repositório.
 
 ---
 
-## Instalação
+## Instalação e execução
+
+### Desktop
 
 Windows + PowerShell:
 
@@ -249,291 +344,56 @@ python -m venv venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python main.py
 ```
 
 Na primeira execução, o PaddleOCR pode baixar os modelos necessários.
 
-Após os modelos estarem disponíveis, o processamento pode funcionar localmente sem depender de serviços externos.
+### Web e Worker
+
+A execução do backend, frontend, Worker e o empacotamento em `.exe` estão documentados em [`web/README.md`](web/README.md).
 
 ---
 
-## Executar
+## Operação
 
-```powershell
-python main.py
-```
+Na interface Desktop:
 
-### Selecionar imagem
+**Selecionar imagem**
+Processa uma foto individual.
 
-Processa uma foto individual de uma folha.
+**Selecionar PDF**
+Processa as páginas individualmente. Uma falha não interrompe o lote.
 
-### Selecionar PDF
+**Revisão**
+Permite corrigir registros pendentes. A correção passa pela mesma validação do fluxo automático; se o problema persistir, o registro permanece em `REVISÃO`.
 
-Processa as páginas do PDF individualmente.
+**Avisos**
+Reúne ocorrências não bloqueantes, como erros de página, divergência de quantidade, linhas sem matrícula e problemas nas bases.
 
-Uma falha em uma página não deve interromper o processamento das demais.
-
-### Revisão
-
-Aba dedicada à correção manual dos registros que não puderam ser confirmados automaticamente.
-
-Ela mostra, lado a lado:
-
-* a **foto da folha** correspondente, com zoom — para conferir o que está escrito no papel sem sair do programa;
-* o **motivo** pelo qual aquela linha não pôde ser confirmada;
-* os **campos editáveis**: Data, Hora, Matrícula, Motivo e Responsável;
-* **Nome e Setor**, obtidos da base pela matrícula (nunca digitados).
-
-Motivo e Responsável são listas alimentadas pelas bases — o valor válido só pode ser um dos cadastrados.
-
-A navegação percorre os pendentes em sequência, na ordem física das folhas.
-
-**Confirmar uma correção não marca o registro como confirmado.** O programa remonta o registro com os valores digitados e roda exatamente a mesma validação do fluxo automático. Se a correção não resolver o problema real, a linha **permanece em revisão**, com a observação atualizada explicando o que ainda falta.
-
-Linhas com `ERRO` não aparecem aqui: uma página que falhou não tem campo algum a corrigir e precisa ser reprocessada.
-
-### Avisos
-
-Reúne os apontamentos que não bloqueiam o processamento: páginas com erro, páginas cuja contagem de liberações divergiu do esperado, linhas sem matrícula identificável e problemas nas bases de dados.
-
-### Gerar XLSX
-
-Gera a planilha final com os registros processados.
-
-A ordem das liberações é preservada de acordo com a ordem encontrada no papel.
-
----
-
-## Validação
-
-Cada linha da planilha recebe um destes três estados:
-
-### CONFIRMADO
-
-Registro em que os dados necessários puderam ser identificados e validados com segurança.
-
-A confirmação considera:
-
-* Matrícula (presente, só com dígitos e encontrada na base, acima do piso de confiança do OCR);
-* Data (presente e interpretável);
-* Motivo (presente e reconhecido na lista fechada);
-* Responsável (presente e identificado na base de gestores);
-* bases de validação disponíveis;
-* correspondências aproximadas e normalizações, quando aplicáveis.
-
-A Hora **não é obrigatória** para confirmação.
-
-Motivo e Responsável, ao contrário, **são obrigatórios**: uma coluna em branco não é "vazia e válida" — é uma linha que o OCR não conseguiu ler, e vai para `REVISÃO`. Sem essa regra, o registro sairia `CONFIRMADO` com a célula em branco, indistinguível de um valor conferido.
-
-### REVISÃO
-
-Registro que contém alguma informação necessária que não pôde ser confirmada com segurança.
-
-Exemplos:
-
-* matrícula ilegível, ausente, não encontrada na base ou com duas leituras plausíveis;
-* gestor ambíguo, cortado ou irreconhecível;
-* motivo não reconhecido ou com evidência insuficiente;
-* data inválida, incompleta ou com ano que destoa do restante do lote;
-* motivo ou responsável ausentes;
-* informação insuficiente para confirmação.
-
-Uma normalização aceita em um campo **não confirma o registro sozinha**: recuperar o motivo não compensa um responsável incerto, e recuperar a data não compensa uma matrícula duvidosa.
-
-O sistema prefere enviar um registro para `REVISÃO` a inventar ou associar uma informação sem evidência suficiente.
-
-### ERRO
-
-Falha de **página inteira**, não de linha: a imagem não abriu, o pré-processamento falhou, o OCR não rodou, a página do PDF não renderizou.
-
-Uma linha `ERRO` não tem campo nenhum de verdade para corrigir, então ela **não aparece na janela de revisão manual** — digitar valores ali seria inventar dados sem nenhuma evidência de OCR por trás. A página precisa ser reprocessada (nova foto ou novo PDF).
-
-Uma página com `ERRO` nunca interrompe o lote: as demais continuam sendo processadas normalmente.
-
----
-
-## Correspondência aproximada
-
-O fuzzy matching é controlado e utiliza conjuntos fechados de candidatos.
-
-A prioridade é:
-
-```text
-1. Correspondência exata
-2. Alias conhecido
-3. Correspondência aproximada controlada
-4. Verificação de ambiguidade
-5. REVISÃO quando não houver segurança suficiente
-```
-
-O sistema não deve simplesmente escolher o candidato com maior pontuação.
-
-Se dois candidatos forem muito próximos ou houver ambiguidade, o registro vai para `REVISÃO`.
-
-### Responsável
-
-O gestor deve ser identificado antes que qualquer texto residual seja considerado.
-
-Exemplo fictício:
-
-```text
-OCR:
-GRX - GESTOR EXEMPLO - TEXTO_DESCONHECIDO
-
-Resultado:
-Responsável = GRX - GESTOR EXEMPLO
-```
-
-O texto desconhecido é ignorado.
-
-Não existe reconhecimento de informações adicionais de auxiliares no resultado principal.
-
----
-
-## Normalizações e recuperações de OCR
-
-Além da correspondência aproximada, o sistema desfaz deformações **previsíveis** de OCR manuscrito. Todas seguem o mesmo padrão de evidência:
-
-```text
-gerar as leituras plausíveis por uma tabela FECHADA de confusões de OCR
-    ↓
-perguntar à base (ou ao contexto do lote) quais existem de verdade
-    ↓
-existe exatamente uma  → aceita
-existem duas ou mais   → ambíguo, ninguém escolhe → REVISÃO
-não existe nenhuma     → REVISÃO
-```
-
-Nenhuma dessas etapas inventa caractere: cada troca vem de uma confusão conhecida, e o resultado ainda passa pela validação normal do campo.
-
-Toda normalização aceita fica registrada na coluna `Observação`, junto com o texto original do OCR — nada é corrigido em silêncio.
-
-### Motivo
-
-Reconhecimento estrutural da família `HORÁRIO NEGADO`: o texto é quebrado em partes, procura-se a que carrega o núcleo (`NEGADO`/`NEGADA`), e as confusões conhecidas são desfeitas (dígito lido no lugar de letra, `n`/`v`/`w`/`m` cursivos, `d` quebrado em dois caracteres).
-
-A aceitação exige **evidência combinada**: similaridade alta sozinha, ou similaridade média mais um segundo critério independente. Em qualquer caso, a evidência da família ainda precisa superar com folga a semelhança com os outros motivos da lista fechada — é essa checagem que impede `RH`, `ADM`, `ARMÁRIOS`, `FOLGA FIXA`, `ESQUECEU CRACHÁ` e `TREINAMENTO` de serem absorvidos indevidamente.
-
-Um texto sem evidência suficiente **não** vira `HORÁRIO NEGADO`: vai para `REVISÃO`.
-
-### Responsável
-
-Quando o código do gestor está legível, ele identifica o gestor sozinho e prevalece sobre o texto secundário — que costuma ser um nome anotado ao lado, ilegível no OCR.
-
-O código é lido pela tabela fechada de confusões e confirmado contra a base de gestores. Se mais de um código cadastrado for leitura plausível, o registro vai para `REVISÃO`.
-
-Uma identificação mais específica presente na base sempre ganha do código isolado.
-
-### Data
-
-Saída sempre em `DD/MM/AA`.
-
-* separadores deformados ou multiplicados são corrigidos quando os dígitos são inequívocos;
-* uma caixa em que o OCR colou Data e Hora é separada quando cada metade valida por conta própria;
-* datas impossíveis continuam recusadas;
-* quando a data não pode ser interpretada com segurança, a célula sai **vazia** e o registro vai para `REVISÃO` — o texto original fica na `Observação`.
-
-### Hora
-
-Saída sempre em `HH:MM`.
-
-Separadores trocados ou apagados pelo OCR são normalizados, e uma hora colada a outro texto na mesma caixa é recuperada quando existe exatamente um trecho com forma de hora e nenhum dígito sobrando fora dele.
-
-Horas impossíveis continuam recusadas e a célula sai vazia — ver a seção *Hora*, acima.
-
-### Matrícula
-
-A matrícula exportada contém **exclusivamente dígitos** (`0-9`). Nunca sai com `+`, `.`, `-`, espaços ou letras.
-
-Os caracteres estranhos não são simplesmente apagados: eles costumam **ser** um dígito lido errado, e removê-los mudaria a matrícula para a de outra pessoa. A leitura correta é escolhida pela existência na base de colaboradores.
-
-Se nenhuma leitura resolver com segurança, a célula sai vazia, o registro vai para `REVISÃO` e a linha é contabilizada no aviso "Linhas sem matrícula" da interface — uma liberação real nunca é descartada.
-
-### Contexto do lote
-
-Fotos e páginas processadas juntas formam um **lote**, e o que uma folha comprova pode resolver outra.
-
-Hoje o contexto guarda apenas o **ano** das datas já lidas. Quando o OCR entrega uma data sem ano (`23.04`) — porque o ano foi escrito pequeno ou ficou cortado na foto —, o ano pode ser completado a partir das outras folhas do mesmo lote.
-
-Isso não é suposição: o ano está escrito, só que em outra página da mesma remessa. A `Observação` registra que o ano veio do contexto, junto com o texto original.
-
-O contexto é conservador:
-
-* só entram datas interpretadas por completo — uma data recuperada por contexto nunca realimenta o contexto;
-* é preciso um mínimo de datas confirmadas; uma folha legível não é "o contexto do lote";
-* o ano precisa ser predominante com folga. Um lote que de fato atravessa a virada do ano **não elege ano nenhum**, e as datas sem ano continuam em `REVISÃO`;
-* o caminho inverso também vale: uma data cujo ano **está escrito** mas destoa do restante do lote vai para `REVISÃO`. O ano não é reescrito — apenas se reconhece que aquela linha precisa ser conferida no papel;
-* o contexto é zerado junto com "Limpar resultados" e nunca atravessa dois lotes diferentes.
-
----
-
-## Ordem dos registros
-
-A ordem das liberações encontrada na folha é preservada.
-
-O sistema não deve ordenar os registros por:
-
-* nome;
-* matrícula;
-* gestor;
-* motivo.
-
-A sequência física das liberações é a referência principal para a saída.
+**Gerar XLSX**
+Exporta a planilha final preservando a ordem física das liberações.
 
 ---
 
 ## Tratamento de erros
 
-O processamento ocorre em threads para manter a interface responsiva.
+O processamento é executado de forma assíncrona para manter a interface responsiva.
 
-Falhas inesperadas durante o processamento de uma imagem são capturadas pelo worker da UI.
+Falhas inesperadas são:
 
-Quando o OCR falha:
+1. capturadas;
+2. registradas;
+3. apresentadas ao usuário;
+4. encerradas sem deixar a interface presa em `Processando...`.
 
-```text
-erro
- ↓
-exceção capturada
- ↓
-erro registrado no log
- ↓
-mensagem apresentada ao usuário
- ↓
-estado "Processando" encerrado
- ↓
-botões restaurados
-```
-
-A interface não deve permanecer indefinidamente presa em `Processando...`.
-
-O processamento de PDF possui tratamento equivalente para erros de página.
-
----
-
-## Desempenho
-
-O principal gargalo atual é o OCR do PaddleOCR.
-
-Em testes realizados em CPU:
-
-```text
-Renderização PDF       ~0,17 s/página
-Pré-processamento      ~0,81 s/página
-OCR                    ~36,5 s/página
-Parser/validação       ~0,003 s/página
-```
-
-O OCR representa aproximadamente 95% do tempo de processamento.
-
-O `enable_mkldnn` permanece desativado devido a uma incompatibilidade reproduzida entre PaddlePaddle/oneDNN no ambiente Windows/CPU utilizado.
-
-Não foram feitas otimizações de velocidade que comprometam a precisão do OCR.
+No processamento de PDFs, a falha de uma página é isolada das demais.
 
 ---
 
 ## Testes
 
-A suíte pode ser executada pelos arquivos individuais em `teste/`.
+Os testes do núcleo estão em `teste/`.
 
 Exemplos:
 
@@ -541,186 +401,97 @@ Exemplos:
 python teste\teste_ocr.py <foto>
 python teste\teste_data_manager.py
 python teste\teste_registro_parser.py
-python teste\teste_pdf_reader.py
 python teste\teste_validacao.py
 python teste\teste_tempo_parser.py
 python teste\teste_xlsx_exporter.py
-python teste\teste_ui_integracao.py
-python teste\teste_erro_pagina.py
-python teste\teste_correspondencia_aproximada.py
-python teste\teste_extracao_fase1.py
-python teste\teste_worker_imagem_falha.py
-python teste\teste_seguranca_lote.py
-python teste\teste_lote_operacional.py
-python teste\teste_normalizacao_ocr.py
-python teste\teste_normalizacao_motivo_hora.py
 python teste\teste_recuperacao_contextual.py
+python teste\teste_integridade_captura.py
 ```
 
-Todas as suítes acima estão aprovadas no ciclo atual. Com exceção de `teste_ocr.py`, que exige uma foto real como argumento, nenhuma depende de PaddleOCR ou das planilhas reais — as bases usadas são fixtures sintéticas.
+`teste_ocr.py` requer uma imagem real e PaddleOCR.
 
-`teste_recuperacao_contextual.py` cobre especificamente as normalizações e recuperações descritas acima: família `HORÁRIO NEGADO` e preservação dos outros seis motivos, leitura do código do gestor, contexto do lote (ano completado, ano divergente, lote que atravessa a virada do ano), horas deformadas, matrícula só com dígitos, e a regra de que normalizar um campo não confirma o registro sozinho.
+Os testes Web, Worker e frontend possuem suítes próprias. Consulte [`web/README.md`](web/README.md) para os detalhes.
 
-Também foram realizados testes com PaddleOCR real sobre um conjunto de cinco folhas reais.
+---
 
-Resultado estrutural:
+## Validação de referência
+
+O sistema foi validado com cinco folhas reais contendo **40 liberações esperadas**:
+
+| Página    | Esperadas | Detectadas |
+| --------- | --------: | ---------: |
+| 1         |         8 |          8 |
+| 2         |         8 |          8 |
+| 3         |         8 |          8 |
+| 4         |         8 |          8 |
+| 5         |         8 |          8 |
+| **Total** |    **40** |     **40** |
+
+Nesse conjunto específico:
+
+* todas as 40 liberações foram detectadas;
+* nenhum registro desapareceu;
+* nenhum registro duplicado foi observado;
+* a ordem física foi preservada;
+* os formatos de saída foram mantidos.
+
+Esse resultado é uma **validação estrutural desse conjunto de folhas**, não uma taxa geral de acurácia do OCR.
+
+Durante o desenvolvimento, uma página apresentou cinco registros devido a um problema no agrupamento espacial. O algoritmo foi corrigido e passou a detectar as oito liberações sem gerar registros fantasmas.
+
+---
+
+## Desempenho
+
+O principal gargalo é o OCR.
+
+Benchmark de referência em CPU:
 
 ```text
-Esperado: 40 liberações
-Encontrado: 40 liberações
-
-40/40 = 100%
+Renderização PDF       ~0,17 s/página
+Pré-processamento       ~0,81 s/página
+OCR                    ~36,5 s/página
+Parser/validação        ~0,003 s/página
 ```
 
-Nenhum registro desapareceu ou foi duplicado, a ordem física foi preservada, e nenhuma matrícula, data ou hora saiu fora do formato exigido.
-
-Os dados utilizados nesses testes são locais e não fazem parte do repositório público.
+O `enable_mkldnn` permanece desativado devido à incompatibilidade reproduzida no ambiente Windows/CPU utilizado nos testes.
 
 ---
 
-## Validação com dados reais
+## Limitações
 
-O sistema foi validado com um conjunto real contendo cinco folhas.
-
-Resultado estrutural:
-
-| Página    | Liberações esperadas | Detectadas |
-| --------- | -------------------: | ---------: |
-| 1         |                    8 |          8 |
-| 2         |                    8 |          8 |
-| 3         |                    8 |          8 |
-| 4         |                    8 |          8 |
-| 5         |                    8 |          8 |
-| **Total** |               **40** |     **40** |
-
-Uma das páginas inicialmente apresentava apenas cinco registros devido a um problema no agrupamento espacial dos elementos OCR.
-
-O algoritmo de agrupamento foi corrigido e a página passou a detectar corretamente as oito liberações.
-
-Nenhum registro fantasma foi observado após a correção.
-
-> Os arquivos originais utilizados nessa validação não são armazenados no repositório público.
-
----
-
-## Princípios do sistema
-
-### Nunca inventar dados
-
-O sistema deve preferir `REVISÃO` a uma correção sem evidência suficiente.
-
-### Não confundir OCR com verdade
-
-O texto reconhecido pelo OCR é apenas uma hipótese que precisa ser validada.
-
-### Não reconhecer informações desnecessárias
-
-Nome e Setor não são extraídos da folha.
-
-### Não interpretar texto residual como dado
-
-Depois que o gestor é identificado com segurança, texto adicional desconhecido não deve contaminar o campo Responsável.
-
-### Preservar a ordem da folha
-
-A sequência física das liberações é mantida.
-
-### Falhas devem ser recuperáveis
-
-Uma exceção não deve deixar a interface travada ou impedir o processamento restante.
-
-### Dados reais não devem ser versionados
-
-Bases de colaboradores, gestores, motivos, imagens de documentos e arquivos de saída contendo dados reais devem permanecer fora do repositório público.
-
----
-
-## Limitações atuais
-
-* O OCR roda em CPU e é relativamente lento.
-* Caligrafia muito ilegível pode resultar em `REVISÃO`.
-* Uma matrícula parcialmente cortada ou ilegível pode não ser recuperada.
-* Gestores parcialmente cortados podem exigir revisão manual.
+* OCR em CPU pode ser lento.
+* Caligrafia muito ilegível pode exigir revisão manual.
+* Matrículas ou gestores parcialmente cortados podem não ser recuperados.
 * A qualidade da fotografia influencia diretamente o OCR.
-* O parser ainda trabalha com OCR da página inteira + geometria, sem ROIs fixas por campo.
-* O agrupamento espacial foi validado com um conjunto limitado de folhas reais e pode exigir novos ajustes caso surjam formulários ou condições de captura muito diferentes.
+* O parser utiliza OCR da página inteira e geometria, sem ROIs fixas por campo.
+* O agrupamento espacial foi validado com um conjunto limitado de folhas reais.
+* As recuperações cobrem apenas deformações previsíveis.
+* Fragmentos de texto impresso podem ocasionalmente cair em colunas de Motivo ou Responsável.
 
-### Limitações das recuperações de OCR
-
-As recuperações descritas acima cobrem deformações **previsíveis**. O que fica de fora continua em `REVISÃO` por falta de evidência — o que é o comportamento pretendido, não uma falha:
-
-* **Responsável cortado ou muito deformado** é o maior grupo de revisões: nome cortado na foto, código com letra que não corresponde a nenhum gestor cadastrado, rabisco. O sistema não escolhe o candidato "mais parecido" só porque ele existe.
-* **Motivo com evidência de um critério só**: leituras muito corrompidas podem ficar acima do limiar mas sem nenhum critério secundário que as corrobore. Preferiu-se `REVISÃO`.
-* **Ano lido errado** não é reescrito, apenas sinalizado. Se um lote tiver muitas datas com o ano mal reconhecido, o contexto do lote é desligado por segurança e as datas sem ano voltam a `REVISÃO`.
-* **O contexto do lote é sequencial**: uma folha sem ano processada antes de o lote acumular datas completas suficientes não é recuperada.
-* **Motivo e Responsável não têm filtro de formato** como Data e Hora têm, então um fragmento de texto impresso do formulário ainda pode, ocasionalmente, cair em uma dessas colunas.
-
-Aumentar o número de `CONFIRMADO` nunca é objetivo em si. É esperado — e aceitável — que uma melhoria apenas corrija os dados internos das linhas sem mudar o status delas.
-
-### Qualidade da imagem
-
-As folhas reais podem apresentar diferentes níveis de iluminação e tonalidade, inclusive papel reciclado ou mais escuro.
-
-O pré-processamento atual utiliza:
-
-```text
-OpenCV
-   ↓
-grayscale
-   ↓
-redução de ruído
-   ↓
-CLAHE
-   ↓
-nitidez
-```
-
-Testes com folhas de tonalidade escura não demonstraram vantagem consistente de abandonar o grayscale atual.
-
-Por isso, nenhuma alteração foi feita apenas para tentar acelerar ou modificar o pré-processamento sem evidência de ganho.
+O objetivo não é maximizar a quantidade de `CONFIRMADO`, e sim aumentar a confiabilidade sem introduzir confirmações indevidas.
 
 ---
 
 ## Segurança dos dados
 
-O projeto pode trabalhar com informações pessoais e operacionais presentes nas folhas e nas bases XLSX.
+O projeto pode trabalhar com informações pessoais e operacionais.
 
 Por isso:
 
-* arquivos reais de colaboradores não devem ser enviados ao repositório público;
-* imagens reais de documentos não devem ser versionadas;
-* PDFs reais não devem ser versionados;
-* planilhas de entrada e saída contendo dados reais não devem ser versionadas;
-* logs contendo informações sensíveis devem permanecer fora do repositório;
-* exemplos presentes na documentação devem utilizar dados fictícios;
-* o arquivo `.gitignore` deve impedir o versionamento acidental de arquivos locais.
-
-O repositório contém apenas o código, testes e documentação necessários ao desenvolvimento do sistema.
+* bases reais não são versionadas;
+* imagens e PDFs reais não são versionados;
+* planilhas com dados reais não são versionadas;
+* logs sensíveis permanecem fora do repositório;
+* exemplos da documentação utilizam dados fictícios;
+* o `.gitignore` exclui arquivos locais sensíveis do fluxo normal de versionamento.
 
 ---
 
-## Evolução do projeto
+## Documentação relacionada
 
-A reorganização arquitetural já foi concluída: o código está separado por responsabilidade em `src/leitor_matriculas/`, com dependência de mão única e grafo acíclico, sem alteração de comportamento funcional.
+* [`web/README.md`](web/README.md) — Web, backend, Worker e empacotamento.
+* `CLAUDE.md` — regras e contratos para desenvolvimento.
+* `dados/LEIA-ME.txt` — informações sobre as bases locais.
 
-Percurso até aqui:
-
-```text
-MVP estável
-    ↓
-reorganização da arquitetura
-    ↓
-preparação para operação em lote real
-    ↓
-recuperação contextual de OCR
-    ↓
-nova evolução funcional
-```
-
-Cada evolução funcional preserva os comportamentos já validados e mantém a suíte de testes como mecanismo de proteção contra regressões.
-
-Direções possíveis a partir daqui, sem compromisso de prazo:
-
-* desempenho do OCR, que hoje concentra a quase totalidade do tempo de processamento;
-* extração por ROI/template da folha, avaliada e **não adotada** — o experimento com fotos reais mostrou substituição incorreta de dígito sem ganho compensatório, e o pipeline atual continua sendo OCR da página inteira + geometria. Uma nova tentativa exigiria política de aceitação mais forte e uma amostra maior de folhas;
-* ampliação das recuperações contextuais, sempre com o mesmo critério: precisão antes de cobertura.
+O histórico detalhado das fases e decisões de engenharia é mantido separadamente da documentação principal do projeto.
