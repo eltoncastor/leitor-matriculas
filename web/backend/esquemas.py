@@ -138,9 +138,10 @@ class ResultadoPaginaResposta(BaseModel):
 class ProgressoRequest(BaseModel):
     tentativa: int
     etapa_atual: Optional[str] = None
-    # Só o PDF manda isto, e só na primeira página (o Worker é quem
-    # renderiza e sabe o total; ver a troca de responsabilidade descrita
-    # em `estado._descobrir_total_paginas`/CLAUDE.md).
+    # Reforço redundante, quase nunca precisa ser enviado: a VPS já
+    # calcula sozinha, ANTES de qualquer Worker existir (ver `estado.
+    # _descobrir_total_paginas`, que roda contra a cópia do arquivo que
+    # ela própria recebeu no upload).
     total_paginas: Optional[int] = None
 
 

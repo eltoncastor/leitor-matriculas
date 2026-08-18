@@ -1,0 +1,34 @@
+# requirements-api.txt -- Sub-fase 26c (OCR Worker distribuído).
+#
+# Só o que a VPS precisa quando roda em LEITOR_MODO=servidor (ver
+# web/backend/config.py e saida/auditoria_fase26_ocr_worker.md): serve a
+# API e o frontend, guarda os Jobs, classifica os registros contra
+# dados/*.xlsx -- NUNCA roda OCR neste processo. Por isso NÃO instala
+# opencv-python, paddleocr nem paddlepaddle (~600 MB somados), que só o
+# Worker precisa (ver requirements-worker.txt).
+#
+# `requirements.txt` (a raiz) continua sendo a instalação COMPLETA -- é o
+# que o modo desktop/`.exe`/desenvolvimento local usa (LEITOR_MODO=local,
+# que roda o OCR no mesmo processo via web/backend/produtor_ocr.py, sem
+# nenhum Worker remoto envolvido). Este arquivo é um subconjunto dele,
+# não um substituto: se um dia esse subconjunto divergir da lista real de
+# módulos que web/backend importa em modo servidor, é aqui que se ajusta.
+#
+# Testado com Python 3.10.11 no Windows/Linux.
+
+numpy>=1.26.0,<2.0.0
+
+# Leitura das bases de apoio (Colaboradores.xlsx, Motivos.xlsx, Gestores.xlsx)
+# e escrita da planilha exportada.
+openpyxl>=3.1.0,<4.0.0
+
+# Só para `pdf_reader.contar_paginas` -- a VPS calcula o total de páginas
+# de um PDF (para a barra de progresso) contra a cópia que ELA recebeu no
+# upload, ANTES de qualquer Worker existir (ver estado.
+# _descobrir_total_paginas). A RENDERIZAÇÃO de página em imagem, essa sim
+# cara, continua sendo trabalho do Worker.
+PyMuPDF>=1.24.0,<2.0.0
+
+fastapi>=0.110.0,<1.0.0
+uvicorn>=0.29.0,<1.0.0
+python-multipart>=0.0.9

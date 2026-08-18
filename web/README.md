@@ -80,9 +80,9 @@ inicialização. A pasta é gitignored (contém matrículas e nomes reais) e rec
 
 ## Protocolo de Worker (Fase 26b)
 
-`/api/worker/*` (`web/backend/rotas/worker.py`) é o que um Worker remoto fala com a VPS -- a
-direção é sempre `Worker → VPS` (o Worker está atrás de NAT, faz polling e entrega resultado por
-POST, nunca recebe conexão). Montado **só** sob `/api/worker`, nunca sob `/leitor/api/worker` --
+`/api/worker/*` (`web/backend/rotas/worker.py`) é o que o Worker (Sub-fase 26c, abaixo) fala com a
+VPS -- a direção é sempre `Worker → VPS` (o Worker está atrás de NAT, faz polling e entrega resultado
+por POST, nunca recebe conexão). Montado **só** sob `/api/worker`, nunca sob `/leitor/api/worker` --
 como o Cloudflare Tunnel só roteia `/leitor/*` até este backend, essa decisão já torna a superfície
 de Worker inalcançável da internet pública, por construção; o acesso real é pela Tailscale, e o
 token (`LEITOR_WORKER_TOKEN`, acima) é a segunda camada, nunca a única.
@@ -96,8 +96,79 @@ precisa repetir) → `GET /jobs/{id}/arquivos/{indice}` (baixar a folha) → por
 `saida/auditoria_fase26_ocr_worker.md`, Sub-fase 26b) → `POST /jobs/{id}/progresso` (opcional) →
 `POST /jobs/{id}/concluir`. Falha do documento inteiro (arquivo que não abre): `POST /jobs/{id}/erro`.
 
-Ainda não existe um processo Worker Windows real que fale este protocolo -- é a Sub-fase 26c. Quem
-o exercita hoje é `web/backend/testes/teste_worker_api.py`.
+## Worker Windows (Fase 26c)
+
+O pacote `worker/` (raiz do projeto, ao lado de `web/`) é o processo que roda o OCR de verdade --
+tipicamente no PC Windows do operador, falando com a VPS pelo protocolo acima. **Não hospeda
+servidor nenhum, não abre porta, não precisa de IP público** -- só faz requisições de saída.
+
+### Requisitos
+
+- Python 3.10.11 (mesma versão do resto do projeto).
+- Um `venv` com `requirements-worker.txt` instalado -- **não** precisa de `requirements.txt`
+  completo nem de `requirements-api.txt` (o Worker não hospeda FastAPI, não lê planilha de
+  referência nenhuma).
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements-worker.txt
+```
+
+### Configuração
+
+Copie `.env.example` para `.env` (raiz do projeto) e preencha:
+
+```
+API_BASE_URL=http://100.x.x.x:8000      # IP Tailscale da VPS -- nunca o dominio publico
+OCR_WORKER_ID=pc-do-operador            # so um rotulo de log
+OCR_WORKER_TOKEN=<o MESMO valor de LEITOR_WORKER_TOKEN configurado na VPS>
+POLL_INTERVAL=5                          # opcional
+HEARTBEAT_INTERVAL=20                    # opcional
+```
+
+`.env` nunca é versionado. Uma variável de ambiente real (`$env:OCR_WORKER_TOKEN = "..."` no
+PowerShell) sempre tem prioridade sobre o `.env`.
+
+### Executar
+
+```powershell
+python -m worker
+```
+
+ou, com o venv já ativo, `iniciar_worker.bat` (mesma convenção dos outros atalhos `.bat` da raiz).
+`Ctrl+C` pede uma parada educada (espera o Job atual terminar); um segundo `Ctrl+C` força.
+
+### Logs
+
+Formato `[Worker] ...` -- nunca inclui o token nem dado pessoal das folhas (matrícula, nome). O que
+aparece: `worker_id`, endereço do servidor, `lote_id` de cada Job recebido/concluído, a etapa atual
+de cada página (as mesmas frases que `Processamento.jsx` já mostra no navegador), e mensagens de
+erro técnico (rede fora do ar, token inválido, falha de OCR numa página específica).
+
+### Troubleshooting
+
+| Sintoma | Causa provável |
+|---|---|
+| `[Worker] Configuração incompleta -- faltam: ...` | `.env` ausente/incompleto, ou variável de ambiente não definida. O programa não tenta nenhuma requisição sem essas três. |
+| `401: Token de Worker inválido` | `OCR_WORKER_TOKEN` (Worker) diferente de `LEITOR_WORKER_TOKEN` (VPS) -- precisam ser IDÊNTICOS. |
+| `503: Este servidor não tem um token de Worker configurado` | A VPS está rodando sem `LEITOR_WORKER_TOKEN` no ambiente -- configure lá, não aqui. |
+| `[Worker] sem conexão com o servidor ... tentando de novo em Ns` | Rede fora do ar / `API_BASE_URL` errado / VPS caída. O Worker faz backoff exponencial sozinho (até 60s entre tentativas) e volta a funcionar assim que a conexão voltar -- não precisa reiniciar. |
+| Um Job fica muito tempo em "aguardando" | Nenhum Worker está de pé, ou todos estão ocupados com outro Job. `GET /api/worker/status` (na VPS) mostra as contagens agregadas. |
+| O Worker parece travado numa página | Normal em folhas grandes/complexas -- OCR real leva ~40s/página, e o carregamento do modelo do PaddleOCR na PRIMEIRA página de um processo novo adiciona mais alguns segundos. O heartbeat continua batendo em thread própria enquanto isso acontece (ver `worker/heartbeat.py`). |
+
+### Verificado
+
+`worker/testes/teste_worker_real.py` processa `entrada/pdf/teste.pdf` (as mesmas 5 folhas reais desde
+a Fase 9) através do pacote `worker/` real, com PaddleOCR real, sobre um servidor HTTP real (socket
+de verdade, não simulado) -- baseline **40 registros, 19 CONFIRMADO, 21 REVISAO, 0 ERRO**, idêntica
+à medida em toda sub-fase anterior desta macrofase.
+
+**Nota sobre o modo desktop/`.exe`**: eles continuam usando `LEITOR_MODO=local` (Sub-fase 26a,
+`web/backend/produtor_ocr.py`) -- rodam o OCR no mesmo processo, sem nenhum Worker remoto envolvido.
+`worker/` é um pacote independente, pensado para o PC Windows remoto do operador falando com uma VPS
+via Tailscale; ver `saida/auditoria_fase26_ocr_worker.md` (Sub-fase 26c) para a justificativa completa
+dessa separação.
 
 ## Frontend (Fase 24b)
 

@@ -201,10 +201,14 @@ def progresso(lote_id: str, corpo: ProgressoRequest, worker_id: str = Depends(au
     """
     `etapa_atual` -- o texto livre que `Processamento.jsx` já renderiza
     (mesmas frases de `pipeline.processar_uma_pagina`: "Lendo o texto
-    escrito à mão...", etc.). `total_paginas` só chega no PDF, e só na
-    primeira página -- é o Worker que renderiza e sabe contar; fora do
-    PDF o total já é conhecido de graça (`len(caminhos)`) e a VPS nunca
-    pede isso ao Worker.
+    escrito à mão...", etc.). `total_paginas` é aceito aqui mas raramente
+    precisa ser enviado: a VPS já calcula sozinha (`estado.
+    _descobrir_total_paginas`, rodando contra a CÓPIA do arquivo que ela
+    própria recebeu no upload -- `pdf_reader.contar_paginas` para PDF,
+    `len(caminhos)` de graça para imagens) logo no início de `processar_
+    lote`, ANTES de qualquer Worker sequer existir. O campo só serve de
+    reforço redundante (nunca é a fonte de verdade) caso um dia esse
+    cálculo local falhe.
 
     Fica LENIENTE de propósito quando este Worker não é mais dono do Job
     (ownership perdida, ou o Job já concluiu) -- diferente de `/paginas/

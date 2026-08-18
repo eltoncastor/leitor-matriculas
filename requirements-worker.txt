@@ -1,0 +1,26 @@
+# requirements-worker.txt -- Sub-fase 26c (OCR Worker distribuído).
+#
+# Só o que o Worker (`python -m worker`, tipicamente no PC Windows do
+# operador) precisa: baixar a folha, rodar o OCR de verdade, entregar o
+# resultado. NÃO instala fastapi/uvicorn/python-multipart (o Worker não
+# hospeda servidor nenhum -- só faz requisições de SAÍDA, `Worker ->
+# VPS`, via `urllib.request` da biblioteca padrão, sem dependência HTTP
+# nova) nem openpyxl (o Worker não lê as planilhas de referência nem
+# classifica nada -- isso é sempre trabalho da VPS).
+#
+# ATENÇÃO sobre o PaddleOCR: fixamos >=3.7.0,<4.0.0 de propósito -- ver
+# o comentário equivalente em requirements.txt (a API 2.x é incompatível
+# com o código de ocr/engine.py). Não faça downgrade para 2.x.
+#
+# Testado com Python 3.10.11 no Windows.
+
+opencv-python>=4.9.0,<5.0.0
+numpy>=1.26.0,<2.0.0
+
+paddleocr>=3.7.0,<4.0.0
+paddlepaddle>=3.0.0,<4.0.0
+
+# Leitura de PDF (páginas -> imagem) -- mesmo motivo de requirements.txt:
+# um único pacote pip, sem dependência externa de um programa como o
+# Poppler, mais simples de instalar no Windows.
+PyMuPDF>=1.24.0,<2.0.0
